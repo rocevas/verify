@@ -43,19 +43,25 @@ class JetstreamServiceProvider extends ServiceProvider
      */
     protected function configurePermissions(): void
     {
-        Jetstream::defaultApiTokenPermissions(['read']);
+        // Default permissions for API tokens
+        Jetstream::defaultApiTokenPermissions(['verify:email', 'verify:bulk']);
 
+        // Available permissions for email verification API
         Jetstream::role('admin', 'Administrator', [
-            'create',
+            'verify:email',
+            'verify:bulk',
             'read',
+            'create',
             'update',
             'delete',
         ])->description('Administrator users can perform any action.');
 
         Jetstream::role('editor', 'Editor', [
+            'verify:email',
+            'verify:bulk',
             'read',
             'create',
             'update',
-        ])->description('Editor users have the ability to read, create, and update.');
+        ])->description('Editor users can verify emails and manage verifications.');
     }
 }
