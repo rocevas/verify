@@ -33,11 +33,14 @@ class CheckBlocklistMonitorJob implements ShouldQueue
         }
 
         try {
+            // Get user's plan to determine which blocklists to check
+            $plan = $monitor->user->getPlan();
+            
             // Perform blocklist check
             if ($monitor->type === 'domain') {
-                $result = $blocklistService->checkDomain($monitor->target);
+                $result = $blocklistService->checkDomain($monitor->target, $plan);
             } else {
-                $result = $blocklistService->checkIp($monitor->target);
+                $result = $blocklistService->checkIp($monitor->target, $plan);
             }
 
             // Save check result
@@ -64,8 +67,8 @@ class CheckBlocklistMonitorJob implements ShouldQueue
                     $checkResult->update(['notification_sent' => true]);
                     
                     Log::info("Blocklist notification sent for monitor {$monitor->id}", [
-                        'monitor' => $monitor->name,
                         'target' => $monitor->target,
+                        'type' => $monitor->type,
                         'blocklists' => $result['blocklists'] ?? [],
                     ]);
                 } catch (\Exception $e) {

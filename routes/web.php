@@ -40,6 +40,11 @@ Route::middleware([
     // Monitors page
     Route::get('/monitors', [\App\Http\Controllers\MonitorController::class, 'index'])->name('monitors');
     
+    // Blocklist Monitor Detail page
+    Route::get('/monitors/blocklist/{id}', function (int $id) {
+        return Inertia::render('BlocklistMonitorDetail', ['monitorId' => $id]);
+    })->name('monitors.blocklist.detail');
+    
     // Inbox Insight page
     Route::get('/inbox-insight', [\App\Http\Controllers\EmailCampaignController::class, 'index'])->name('inbox-insight');
     
@@ -100,6 +105,11 @@ Route::middleware([
         
         // Check results
         Route::get('/{type}/{id}/results', [\App\Http\Controllers\Api\MonitorController::class, 'checkResults']);
+    });
+    
+    // Blacklist routes
+    Route::prefix('api/blacklists')->group(function () {
+        Route::get('/', [\App\Http\Controllers\Api\BlacklistController::class, 'index']);
     });
     
     // Email Campaign routes (for UI)

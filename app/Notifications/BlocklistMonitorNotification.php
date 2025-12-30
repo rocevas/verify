@@ -33,7 +33,6 @@ class BlocklistMonitorNotification extends Notification implements ShouldQueue
             ->subject("⚠️ {$type} {$target} pateko į blocklistą")
             ->greeting('Sveiki!')
             ->line("Jūsų stebimas {$type} **{$target}** buvo aptiktas blocklistose.")
-            ->line("**Monitorius:** {$this->monitor->name}")
             ->line("**Rastas blocklistose:** {$blocklists}")
             ->line("Prašome imtis veiksmų, kad pašalintumėte {$type} iš blocklistų.")
             ->action('Peržiūrėti monitorių', url('/admin/monitors'))
@@ -44,7 +43,6 @@ class BlocklistMonitorNotification extends Notification implements ShouldQueue
     {
         return [
             'monitor_id' => $this->monitor->id,
-            'monitor_name' => $this->monitor->name,
             'target' => $this->monitor->target,
             'type' => $this->monitor->type,
             'blocklists' => $this->checkResult['blocklists'] ?? [],

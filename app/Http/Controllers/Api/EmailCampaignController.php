@@ -81,8 +81,12 @@ class EmailCampaignController extends Controller
             'headers' => $request->input('headers'),
         ]);
 
-        // Automatically start check after creation
+        // Automatically start check after creation (with timeout protection)
+        // Don't block the response - check will happen in background or user can trigger manually
         try {
+            // Set timeout to prevent blocking
+            set_time_limit(60);
+            
             $result = $this->spamAssassinService->checkCampaign($campaign);
             
             EmailCampaignCheckResult::create([
@@ -99,9 +103,11 @@ class EmailCampaignController extends Controller
             ]);
         } catch (\Exception $e) {
             // Log error but don't fail campaign creation
+            // This allows the campaign to be created even if check fails
             \Log::error('Failed to auto-check campaign after creation', [
                 'campaign_id' => $campaign->id,
                 'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
             ]);
         }
 

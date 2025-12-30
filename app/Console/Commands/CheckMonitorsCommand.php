@@ -32,7 +32,7 @@ class CheckMonitorsCommand extends Command
             try {
                 CheckBlocklistMonitorJob::dispatch($monitor->id);
                 $blocklistCount++;
-                $this->line("Queued blocklist check for: {$monitor->name} ({$monitor->target})");
+                $this->line("Queued blocklist check for: {$monitor->target} ({$monitor->type})");
             } catch (\Exception $e) {
                 $this->error("Failed to queue blocklist monitor {$monitor->id}: {$e->getMessage()}");
                 Log::error("Failed to queue blocklist monitor check", [

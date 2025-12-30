@@ -161,13 +161,14 @@ class SpamAssassinCheckService
     private function checkWithSpamc(string $spamcPath, string $emailMessage): string
     {
         $command = sprintf(
-            '%s -c -H %s -p %d',
+            '%s -c -H %s -p %d --timeout=30',
             escapeshellarg($spamcPath),
             escapeshellarg($this->spamAssassinHost),
             escapeshellarg($this->spamAssassinPort)
         );
         
-        $process = Process::run($command)
+        $process = Process::timeout(35)
+            ->run($command)
             ->input($emailMessage);
         
         if (!$process->successful()) {
@@ -182,11 +183,31 @@ class SpamAssassinCheckService
      */
     private function checkWithSocket(string $emailMessage): string
     {
-        $socket = @fsockopen($this->spamAssassinHost, $this->spamAssassinPort, $errno, $errstr, 5);
+        // Use stream_socket_client with timeout context to prevent blocking
+        $context = stream_context_create([
+            'socket' => [
+                'connect_timeout' => 5,
+                'read_timeout' => 30,
+                'write_timeout' => 10,
+            ]
+        ]);
+        
+        $socket = @stream_socket_client(
+            "tcp://{$this->spamAssassinHost}:{$this->spamAssassinPort}",
+            $errno,
+            $errstr,
+            5,
+            STREAM_CLIENT_CONNECT,
+            $context
+        );
         
         if (!$socket) {
             throw new \RuntimeException("Failed to connect to SpamAssassin: {$errstr} ({$errno}). Make sure SpamAssassin container is running.");
         }
+        
+        // Set stream timeout to prevent infinite blocking
+        stream_set_timeout($socket, 30);
+        stream_set_blocking($socket, true);
         
         // SpamAssassin protocol: send REPORT command to get detailed results
         // Format: SPAMC/1.5\r\nContent-length: <length>\r\n\r\n<email>
@@ -196,15 +217,33 @@ class SpamAssassinCheckService
         $request .= "\r\n";
         $request .= $emailMessage;
         
-        fwrite($socket, $request);
+        $written = @fwrite($socket, $request);
+        if ($written === false) {
+            fclose($socket);
+            throw new \RuntimeException("Failed to write to SpamAssassin socket");
+        }
         
-        // Read response headers
+        // Read response with timeout protection
         $response = '';
         $headers = true;
-        $contentLength = 0;
+        $responseContentLength = 0;
+        $maxReads = 1000; // Prevent infinite loop
+        $readCount = 0;
         
-        while (!feof($socket)) {
-            $line = fgets($socket, 4096);
+        while (!feof($socket) && $readCount < $maxReads) {
+            $readCount++;
+            
+            // Check for timeout
+            $meta = stream_get_meta_data($socket);
+            if ($meta['timed_out']) {
+                fclose($socket);
+                throw new \RuntimeException("SpamAssassin read timeout after 30 seconds");
+            }
+            
+            $line = @fgets($socket, 4096);
+            if ($line === false) {
+                break;
+            }
             
             if ($headers) {
                 $response .= $line;
@@ -217,16 +256,17 @@ class SpamAssassinCheckService
                 
                 // Extract content length
                 if (stripos($line, 'Content-length:') === 0) {
-                    $contentLength = (int) trim(substr($line, 15));
+                    $responseContentLength = (int) trim(substr($line, 15));
                 }
             } else {
                 // Read body
                 $response .= $line;
                 
                 // Stop if we've read all content
-                if ($contentLength > 0) {
-                    $bodyLength = strlen($response) - strlen(explode("\r\n\r\n", $response, 2)[0] ?? '') - 4;
-                    if ($bodyLength >= $contentLength) {
+                if ($responseContentLength > 0) {
+                    $parts = explode("\r\n\r\n", $response, 2);
+                    $bodyLength = isset($parts[1]) ? strlen($parts[1]) : 0;
+                    if ($bodyLength >= $responseContentLength) {
                         break;
                     }
                 }
@@ -234,6 +274,10 @@ class SpamAssassinCheckService
         }
         
         fclose($socket);
+        
+        if (empty($response)) {
+            throw new \RuntimeException("Empty response from SpamAssassin");
+        }
         
         return $response;
     }

@@ -8,35 +8,72 @@ use Illuminate\Support\Facades\Cache;
 class BlocklistCheckService
 {
     /**
-     * Popular DNS-based blocklists for domains and IPs
+     * Get blocklists for a specific plan
+     *
+     * @param string $plan
+     * @return array
      */
-    private const DOMAIN_BLOCKLISTS = [
-        'zen.spamhaus.org' => 'Spamhaus ZEN',
-        'bl.spamcop.net' => 'SpamCop',
-        'dnsbl.sorbs.net' => 'SORBS',
-        'multi.surbl.org' => 'SURBL',
-        'bl.mailspike.net' => 'Mailspike',
-    ];
-
-    private const IP_BLOCKLISTS = [
-        'zen.spamhaus.org' => 'Spamhaus ZEN',
-        'bl.spamcop.net' => 'SpamCop',
-        'dnsbl.sorbs.net' => 'SORBS',
-        'bl.mailspike.net' => 'Mailspike',
-        'b.barracudacentral.org' => 'Barracuda',
-    ];
+    private function getBlocklistsForPlan(string $plan = 'free'): array
+    {
+        $config = config('blocklists.plans', []);
+        $defaultPlan = config('blocklists.default_plan', 'free');
+        
+        // Get blocklists for the plan, fallback to default plan if plan doesn't exist
+        $blocklists = $config[$plan] ?? $config[$defaultPlan] ?? [];
+        
+        return $blocklists;
+    }
 
     /**
      * Check if a domain is listed in any blocklist
+     * Resolves domain to IP and checks the IP in DNS blocklists
+     *
+     * @param string $domain
+     * @param string $plan The user's plan (free or paid)
+     * @return array
      */
-    public function checkDomain(string $domain): array
+    public function checkDomain(string $domain, string $plan = 'free'): array
     {
         $foundIn = [];
         $details = [];
+        $resolvedIp = null;
 
-        foreach (self::DOMAIN_BLOCKLISTS as $blocklist => $name) {
+        // Resolve domain to IP address
+        try {
+            $resolvedIp = gethostbyname($domain);
+            
+            // If gethostbyname returns the same string, DNS resolution failed
+            if ($resolvedIp === $domain) {
+                throw new \Exception("Failed to resolve domain {$domain} to IP address");
+            }
+            
+            if (!filter_var($resolvedIp, FILTER_VALIDATE_IP)) {
+                throw new \Exception("Invalid IP address resolved for domain {$domain}: {$resolvedIp}");
+            }
+            
+            $details['resolved_ip'] = $resolvedIp;
+        } catch (\Exception $e) {
+            Log::warning("Failed to resolve domain {$domain} to IP", [
+                'error' => $e->getMessage(),
+            ]);
+            
+            return [
+                'is_blocklisted' => false,
+                'blocklists' => [],
+                'details' => [
+                    'error' => $e->getMessage(),
+                    'resolved_ip' => null,
+                ],
+            ];
+        }
+
+        // Check the resolved IP in IP blocklists
+        $reversedIp = $this->reverseIp($resolvedIp);
+        $blocklists = $this->getBlocklistsForPlan($plan);
+        
+        foreach ($blocklists as $blocklist => $name) {
             try {
-                $isListed = $this->checkDnsBlocklist($domain, $blocklist);
+                $isListed = $this->checkDnsBlocklist($reversedIp, $blocklist);
                 
                 if ($isListed) {
                     $foundIn[] = $name;
@@ -51,7 +88,7 @@ class BlocklistCheckService
                     ];
                 }
             } catch (\Exception $e) {
-                Log::warning("Failed to check domain {$domain} against {$blocklist}", [
+                Log::warning("Failed to check domain {$domain} (IP: {$resolvedIp}) against {$blocklist}", [
                     'error' => $e->getMessage(),
                 ]);
                 $details[$name] = [
@@ -70,9 +107,13 @@ class BlocklistCheckService
     }
 
     /**
-     * Check if an IP address is listed in any blocklist
+     * Check if an IP address is listed in any DNS blocklist
+     *
+     * @param string $ip
+     * @param string $plan The user's plan (free or paid)
+     * @return array
      */
-    public function checkIp(string $ip): array
+    public function checkIp(string $ip, string $plan = 'free'): array
     {
         // Validate IP address
         if (!filter_var($ip, FILTER_VALIDATE_IP)) {
@@ -84,8 +125,9 @@ class BlocklistCheckService
 
         // Reverse IP for DNSBL lookup (e.g., 192.168.1.1 -> 1.1.168.192)
         $reversedIp = $this->reverseIp($ip);
+        $blocklists = $this->getBlocklistsForPlan($plan);
 
-        foreach (self::IP_BLOCKLISTS as $blocklist => $name) {
+        foreach ($blocklists as $blocklist => $name) {
             try {
                 $isListed = $this->checkDnsBlocklist($reversedIp, $blocklist);
                 

@@ -32,6 +32,26 @@ class BlocklistMonitor extends Model
         'last_check_details' => 'array',
     ];
 
+    protected static function booted(): void
+    {
+        static::saving(function (BlocklistMonitor $monitor) {
+            // Auto-detect type if not set
+            if (!$monitor->type && $monitor->target) {
+                $monitor->type = filter_var($monitor->target, FILTER_VALIDATE_IP) ? 'ip' : 'domain';
+            }
+            
+            // Auto-set name from target if not set (for backward compatibility)
+            if (!$monitor->name && $monitor->target) {
+                $monitor->name = $monitor->target;
+            }
+            
+            // Set default check interval to 1440 minutes (24 hours) if not set
+            if (!$monitor->check_interval_minutes) {
+                $monitor->check_interval_minutes = 1440;
+            }
+        });
+    }
+
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);

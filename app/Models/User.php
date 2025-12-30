@@ -87,4 +87,18 @@ class User extends Authenticatable
     {
         return $this->hasMany(EmailCampaign::class);
     }
+
+    /**
+     * Get the user's plan (free or paid)
+     * This can be extended in the future to check actual subscription status
+     *
+     * @return string
+     */
+    public function getPlan(): string
+    {
+        // TODO: Implement actual plan/subscription checking
+        // For now, return 'free' for all users
+        // In the future, you can check subscription status here
+        return 'free';
+    }
 }

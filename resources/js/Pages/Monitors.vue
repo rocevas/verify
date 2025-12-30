@@ -22,12 +22,29 @@ const editingDmarc = ref(null);
 // Blocklist monitors
 const blocklistMonitors = ref([]);
 const blocklistForm = ref({
-    name: '',
     type: 'domain',
     target: '',
     active: true,
     check_interval_minutes: 60,
 });
+
+// Auto-detect type from target input
+const detectType = (target) => {
+    if (!target) return 'domain';
+    // Simple IP validation regex
+    const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
+    if (ipRegex.test(target)) {
+        // Additional validation: check if each octet is 0-255
+        const parts = target.split('.');
+        if (parts.length === 4 && parts.every(part => {
+            const num = parseInt(part, 10);
+            return num >= 0 && num <= 255;
+        })) {
+            return 'ip';
+        }
+    }
+    return 'domain';
+};
 
 // DMARC monitors
 const dmarcMonitors = ref([]);
@@ -71,15 +88,13 @@ const openBlocklistModal = (monitor = null) => {
     editingBlocklist.value = monitor;
     if (monitor) {
         blocklistForm.value = {
-            name: monitor.name,
-            type: monitor.type,
+            type: monitor.type || detectType(monitor.target),
             target: monitor.target,
-            active: monitor.active,
-            check_interval_minutes: monitor.check_interval_minutes,
+            active: monitor.active !== undefined ? monitor.active : true,
+            check_interval_minutes: monitor.check_interval_minutes || 60,
         };
     } else {
         blocklistForm.value = {
-            name: '',
             type: 'domain',
             target: '',
             active: true,
@@ -114,15 +129,30 @@ const openDmarcModal = (monitor = null) => {
 const saveBlocklistMonitor = async () => {
     try {
         loading.value = true;
+        // Auto-detect type before saving
+        const formData = {
+            ...blocklistForm.value,
+            type: detectType(blocklistForm.value.target),
+        };
+        
+        let monitorId;
         if (editingBlocklist.value) {
-            await window.axios.put(`/api/monitors/blocklist/${editingBlocklist.value.id}`, blocklistForm.value, {
+            const response = await window.axios.put(`/api/monitors/blocklist/${editingBlocklist.value.id}`, formData, {
                 withCredentials: true,
             });
+            monitorId = editingBlocklist.value.id;
         } else {
-            await window.axios.post('/api/monitors/blocklist', blocklistForm.value, {
+            const response = await window.axios.post('/api/monitors/blocklist', formData, {
                 withCredentials: true,
             });
+            monitorId = response.data.id;
+            
+            // Redirect to detail page (check is automatically queued by backend)
+            showBlocklistModal.value = false;
+            router.visit(`/monitors/blocklist/${monitorId}`);
+            return;
         }
+        
         showBlocklistModal.value = false;
         await loadBlocklistMonitors();
     } catch (error) {
@@ -300,9 +330,8 @@ onMounted(() => {
                                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                                     <thead class="bg-gray-50 dark:bg-gray-700">
                                         <tr>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Name</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Domain / IP</th>
                                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Type</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Target</th>
                                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Status</th>
                                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Last Checked</th>
                                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Actions</th>
@@ -311,13 +340,10 @@ onMounted(() => {
                                     <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                                         <tr v-for="monitor in blocklistMonitors" :key="monitor.id">
                                             <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
-                                                {{ monitor.name }}
+                                                {{ monitor.target }}
                                             </td>
                                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
                                                 <span class="px-2 py-1 bg-blue-100 dark:bg-blue-900 rounded">{{ monitor.type }}</span>
-                                            </td>
-                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                                                {{ monitor.target }}
                                             </td>
                                             <td class="px-6 py-4 whitespace-nowrap">
                                                 <span :class="['px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full', getStatusColor(monitor.is_blocklisted)]">
@@ -328,7 +354,7 @@ onMounted(() => {
                                                 {{ monitor.last_checked_at ? new Date(monitor.last_checked_at).toLocaleString() : 'Never' }}
                                             </td>
                                             <td class="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
-                                                <button @click="checkBlocklistMonitor(monitor.id)" class="text-indigo-600 hover:text-indigo-900 dark:text-indigo-400">Check</button>
+                                                <button @click="router.visit(`/monitors/blocklist/${monitor.id}`)" class="text-indigo-600 hover:text-indigo-900 dark:text-indigo-400">View</button>
                                                 <button @click="openBlocklistModal(monitor)" class="text-blue-600 hover:text-blue-900 dark:text-blue-400">Edit</button>
                                                 <button @click="deleteBlocklistMonitor(monitor.id)" class="text-red-600 hover:text-red-900 dark:text-red-400">Delete</button>
                                             </td>
@@ -406,51 +432,19 @@ onMounted(() => {
 
                 <div class="space-y-4">
                     <div>
-                        <InputLabel for="blocklist-name" value="Name" />
-                        <TextInput
-                            id="blocklist-name"
-                            v-model="blocklistForm.name"
-                            type="text"
-                            class="mt-1 block w-full"
-                            required
-                        />
-                    </div>
-
-                    <div>
-                        <InputLabel for="blocklist-type" value="Type" />
-                        <select
-                            id="blocklist-type"
-                            v-model="blocklistForm.type"
-                            class="mt-1 block w-full border-gray-300 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 focus:border-indigo-500 focus:ring-indigo-500 rounded-md shadow-sm"
-                        >
-                            <option value="domain">Domain</option>
-                            <option value="ip">IP Address</option>
-                        </select>
-                    </div>
-
-                    <div>
-                        <InputLabel for="blocklist-target" value="Target" />
+                        <InputLabel for="blocklist-target" value="Domain or IP Address" />
                         <TextInput
                             id="blocklist-target"
                             v-model="blocklistForm.target"
                             type="text"
                             class="mt-1 block w-full"
-                            :placeholder="blocklistForm.type === 'domain' ? 'example.com' : '192.168.1.1'"
+                            placeholder="example.com or 192.168.1.1"
+                            @input="blocklistForm.type = detectType(blocklistForm.target)"
                             required
                         />
-                    </div>
-
-                    <div>
-                        <InputLabel for="blocklist-interval" value="Check Interval (minutes)" />
-                        <TextInput
-                            id="blocklist-interval"
-                            v-model.number="blocklistForm.check_interval_minutes"
-                            type="number"
-                            min="5"
-                            max="1440"
-                            class="mt-1 block w-full"
-                            required
-                        />
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            Type will be detected automatically ({{ blocklistForm.type === 'ip' ? 'IP Address' : 'Domain' }})
+                        </p>
                     </div>
 
                     <div class="flex items-center">

@@ -68,11 +68,10 @@ class MonitorController extends Controller
     public function blocklistStore(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
-            'name' => 'required|string|max:255',
-            'type' => 'required|in:domain,ip',
             'target' => 'required|string|max:255',
+            'type' => 'sometimes|in:domain,ip',
             'active' => 'boolean',
-            'check_interval_minutes' => 'required|integer|min:5|max:1440',
+            'check_interval_minutes' => 'sometimes|integer|min:5|max:1440',
             'team_id' => 'nullable|exists:teams,id',
         ]);
 
@@ -82,16 +81,26 @@ class MonitorController extends Controller
 
         $user = $request->user();
         $team = $user->currentTeam;
+        $target = $request->input('target');
+        
+        // Auto-detect type if not provided
+        $type = $request->input('type');
+        if (!$type) {
+            $type = filter_var($target, FILTER_VALIDATE_IP) ? 'ip' : 'domain';
+        }
 
         $monitor = BlocklistMonitor::create([
             'user_id' => $user->id,
             'team_id' => $request->input('team_id') ?? $team?->id,
-            'name' => $request->input('name'),
-            'type' => $request->input('type'),
-            'target' => $request->input('target'),
+            'name' => $target, // Auto-set name from target
+            'type' => $type,
+            'target' => $target,
             'active' => $request->input('active', true),
-            'check_interval_minutes' => $request->input('check_interval_minutes', 60),
+            'check_interval_minutes' => $request->input('check_interval_minutes', 1440),
         ]);
+
+        // Automatically dispatch check job after creation
+        CheckBlocklistMonitorJob::dispatch($monitor->id);
 
         return response()->json($monitor, 201);
     }
@@ -138,7 +147,6 @@ class MonitorController extends Controller
         $monitor = BlocklistMonitor::where('user_id', $request->user()->id)->findOrFail($id);
 
         $validator = Validator::make($request->all(), [
-            'name' => 'sometimes|string|max:255',
             'type' => 'sometimes|in:domain,ip',
             'target' => 'sometimes|string|max:255',
             'active' => 'boolean',
@@ -149,9 +157,19 @@ class MonitorController extends Controller
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        $monitor->update($request->only([
-            'name', 'type', 'target', 'active', 'check_interval_minutes'
-        ]));
+        $updateData = $request->only(['type', 'target', 'active', 'check_interval_minutes']);
+        
+        // Auto-detect type if target changed and type not provided
+        if (isset($updateData['target']) && !isset($updateData['type'])) {
+            $updateData['type'] = filter_var($updateData['target'], FILTER_VALIDATE_IP) ? 'ip' : 'domain';
+        }
+        
+        // Auto-set name from target if target changed
+        if (isset($updateData['target'])) {
+            $updateData['name'] = $updateData['target'];
+        }
+
+        $monitor->update($updateData);
 
         return response()->json($monitor);
     }
