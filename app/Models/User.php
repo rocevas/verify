@@ -82,4 +82,9 @@ class User extends Authenticatable
     {
         return $this->hasMany(DmarcMonitor::class);
     }
+
+    public function emailCampaigns(): HasMany
+    {
+        return $this->hasMany(EmailCampaign::class);
+    }
 }

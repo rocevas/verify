@@ -25,6 +25,7 @@ services:
             - pgsql
             - redis
             - mailpit
+            - spamassassin
     pgsql:
         image: 'postgres:18-alpine'
         ports:
@@ -72,6 +73,25 @@ services:
             - '${FORWARD_MAILPIT_DASHBOARD_PORT:-8025}:8025'
         networks:
             - sail
+    spamassassin:
+        image: 'instantlinux/spamassassin:latest'
+        ports:
+            - '${FORWARD_SPAMASSASSIN_PORT:-783}:783'
+        environment:
+            - ENABLE_LEARNING=true
+            - ENABLE_UPDATES=true
+        volumes:
+            - 'sail-spamassassin-logs:/var/log/spamassassin'
+            - 'sail-spamassassin-config:/etc/spamassassin'
+            - 'sail-spamassassin-data:/var/lib/spamassassin'
+        networks:
+            - sail
+        healthcheck:
+            test: ["CMD-SHELL", "timeout 1 bash -c 'echo > /dev/tcp/localhost/783' || exit 1"]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+            start_period: 120s
 networks:
     sail:
         driver: bridge
@@ -79,4 +99,10 @@ volumes:
     sail-pgsql:
         driver: local
     sail-redis:
+        driver: local
+    sail-spamassassin-logs:
+        driver: local
+    sail-spamassassin-config:
+        driver: local
+    sail-spamassassin-data:
         driver: local

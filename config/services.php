@@ -35,4 +35,10 @@ return [
         ],
     ],
 
+    'spamassassin' => [
+        'host' => env('SPAMASSASSIN_HOST', 'spamassassin'),
+        'port' => env('SPAMASSASSIN_PORT', 783),
+        'threshold' => env('SPAMASSASSIN_THRESHOLD', 5.0),
+    ],
+
 ];

@@ -40,6 +40,12 @@ Route::middleware([
     // Monitors page
     Route::get('/monitors', [\App\Http\Controllers\MonitorController::class, 'index'])->name('monitors');
     
+    // Inbox Insight page
+    Route::get('/inbox-insight', [\App\Http\Controllers\EmailCampaignController::class, 'index'])->name('inbox-insight');
+    
+    // Email Campaign Check page
+    Route::get('/inbox-insight/campaign/{id}/check', [\App\Http\Controllers\EmailCampaignController::class, 'check'])->name('inbox-insight.check');
+    
     // Dashboard API routes
     Route::prefix('api/dashboard')->group(function () {
         Route::get('/stats', [\App\Http\Controllers\DashboardController::class, 'stats']);
@@ -94,5 +100,16 @@ Route::middleware([
         
         // Check results
         Route::get('/{type}/{id}/results', [\App\Http\Controllers\Api\MonitorController::class, 'checkResults']);
+    });
+    
+    // Email Campaign routes (for UI)
+    Route::prefix('api/campaigns')->group(function () {
+        Route::get('/', [\App\Http\Controllers\Api\EmailCampaignController::class, 'index']);
+        Route::post('/', [\App\Http\Controllers\Api\EmailCampaignController::class, 'store']);
+        Route::get('/{id}', [\App\Http\Controllers\Api\EmailCampaignController::class, 'show']);
+        Route::put('/{id}', [\App\Http\Controllers\Api\EmailCampaignController::class, 'update']);
+        Route::delete('/{id}', [\App\Http\Controllers\Api\EmailCampaignController::class, 'destroy']);
+        Route::post('/{id}/check', [\App\Http\Controllers\Api\EmailCampaignController::class, 'check']);
+        Route::get('/{id}/results', [\App\Http\Controllers\Api\EmailCampaignController::class, 'checkResults']);
     });
 });

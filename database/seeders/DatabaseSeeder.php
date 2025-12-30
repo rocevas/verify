@@ -22,5 +22,7 @@ class DatabaseSeeder extends Seeder
             'password' => Hash::make('secret'),
             'email_verified_at' => now(),
         ]);
+
+        $this->call(BlacklistSeeder::class);
     }
 }
