@@ -6,6 +6,7 @@ use App\Models\BulkVerificationJob;
 use App\Models\EmailVerification;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class DashboardController extends Controller
 {
@@ -74,6 +75,42 @@ class DashboardController extends Controller
                 'percentages' => $monthPercentages,
             ],
         ]);
+    }
+
+    public function chart(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        $team = $user->currentTeam;
+        $teamId = $team?->id;
+
+        if (!$teamId) {
+            return response()->json(['data' => []]);
+        }
+
+        // Get last 30 days of data grouped by date
+        $chartData = EmailVerification::where('team_id', $teamId)
+            ->where('created_at', '>=', now()->subDays(30))
+            ->selectRaw('
+                DATE(created_at) as date,
+                COUNT(*) as total,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
+                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
+            ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
+            ->groupBy(\DB::raw('DATE(created_at)'))
+            ->orderBy('date', 'asc')
+            ->get()
+            ->map(function ($item) {
+                return [
+                    'date' => $item->date,
+                    'total' => (int) $item->total,
+                    'valid' => (int) $item->valid,
+                    'invalid' => (int) $item->invalid,
+                    'risky' => (int) $item->risky,
+                ];
+            });
+
+        return response()->json(['data' => $chartData]);
     }
 
     public function recent(Request $request): JsonResponse

@@ -112,6 +112,7 @@ class EmailVerificationService
             'domain' => null,
             'checks' => [
                 'syntax' => false,
+                'blacklist' => false,
                 'mx' => false,
                 'smtp' => false,
                 'disposable' => false,
@@ -148,7 +149,28 @@ class EmailVerificationService
                 return $result;
             }
 
-            // 2. Disposable email check
+            // 2. Blacklist check
+            $blacklist = \App\Models\Blacklist::isBlacklisted($email);
+            if ($blacklist) {
+                // Map blacklist reason to status
+                $statusMap = [
+                    'spamtrap' => 'spamtrap',
+                    'abuse' => 'abuse',
+                    'do_not_mail' => 'do_not_mail',
+                    'bounce' => 'invalid',
+                    'complaint' => 'abuse',
+                    'other' => 'do_not_mail',
+                ];
+                $result['status'] = $statusMap[$blacklist->reason] ?? 'do_not_mail';
+                $result['error'] = "Blacklisted: {$blacklist->reason}" . ($blacklist->notes ? " - {$blacklist->notes}" : '');
+                $result['score'] = 0;
+                $result['checks']['blacklist'] = true;
+                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                return $result;
+            }
+            $result['checks']['blacklist'] = false;
+
+            // 3. Disposable email check
             $result['checks']['disposable'] = $this->checkDisposable($parts['domain']);
             if ($result['checks']['disposable']) {
                 $result['status'] = 'do_not_mail';
@@ -163,7 +185,7 @@ class EmailVerificationService
                 $result['status'] = 'risky';
             }
 
-            // 4. MX check
+            // 5. MX check
             $result['checks']['mx'] = $this->checkMx($parts['domain']);
             if (!$result['checks']['mx']) {
                 $result['status'] = 'invalid';

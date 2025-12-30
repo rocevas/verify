@@ -13,13 +13,10 @@ const stats = ref({
     month: { total: 0, valid: 0, invalid: 0, risky: 0, percentages: {} }
 });
 
-const recentVerifications = ref([]);
-const bulkJobs = ref([]);
-const individualVerifications = ref([]);
-const expandedBulkJobs = ref(new Set());
-const bulkJobEmails = ref({}); // { bulkJobId: [emails] }
-const loadingBulkEmails = ref(new Set());
 const loading = ref(false);
+
+// Chart data
+const chartData = ref([]);
 
 // Email verification form
 const verificationMode = ref('single'); // 'single' or 'batch'
@@ -41,62 +38,15 @@ const loadStats = async () => {
     }
 };
 
-const loadRecentVerifications = async () => {
+const loadChart = async () => {
     try {
-        const response = await axios.get('/api/dashboard/recent', {
+        const response = await axios.get('/api/dashboard/chart', {
             withCredentials: true,
         });
-        bulkJobs.value = response.data.bulk_jobs || [];
-        individualVerifications.value = response.data.individual_verifications || [];
-        // Keep old format for backward compatibility
-        recentVerifications.value = [
-            ...bulkJobs.value,
-            ...individualVerifications.value,
-        ];
+        chartData.value = response.data.data || [];
     } catch (error) {
-        console.error('Failed to load recent verifications:', error);
-        console.error('Error response:', error.response?.data);
+        console.error('Failed to load chart data:', error);
     }
-};
-
-const toggleBulkJob = async (bulkJobId) => {
-    if (expandedBulkJobs.value.has(bulkJobId)) {
-        expandedBulkJobs.value.delete(bulkJobId);
-    } else {
-        expandedBulkJobs.value.add(bulkJobId);
-        // Load emails if not already loaded
-        if (!bulkJobEmails.value[bulkJobId]) {
-            await loadBulkJobEmails(bulkJobId);
-        }
-    }
-};
-
-const loadBulkJobEmails = async (bulkJobId) => {
-    if (loadingBulkEmails.value.has(bulkJobId)) {
-        return;
-    }
-
-    loadingBulkEmails.value.add(bulkJobId);
-    try {
-        const response = await axios.get(`/api/dashboard/bulk-jobs/${bulkJobId}/emails`, {
-            withCredentials: true,
-        });
-        bulkJobEmails.value[bulkJobId] = response.data;
-    } catch (error) {
-        console.error('Failed to load bulk job emails:', error);
-    } finally {
-        loadingBulkEmails.value.delete(bulkJobId);
-    }
-};
-
-const getBulkJobStatusColor = (status) => {
-    const colors = {
-        completed: 'bg-green-100 text-green-800',
-        processing: 'bg-blue-100 text-blue-800',
-        pending: 'bg-yellow-100 text-yellow-800',
-        failed: 'bg-red-100 text-red-800',
-    };
-    return colors[status] || colors.pending;
 };
 
 const getStatusColor = (status) => {
@@ -133,9 +83,8 @@ const verifySingleEmail = async () => {
         verificationResult.value = response.data;
         singleEmail.value = '';
 
-        // Refresh stats and recent verifications
+        // Refresh stats
         await loadStats();
-        await loadRecentVerifications();
     } catch (err) {
         if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
             error.value = 'Verification timed out. The email server may be slow to respond.';
@@ -192,9 +141,8 @@ const verifyBatchEmails = async () => {
             return;
         }
 
-        // Refresh stats and recent verifications
+        // Refresh stats
         await loadStats();
-        await loadRecentVerifications();
     } catch (err) {
         if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
             error.value = 'Batch verification timed out. Some email servers may be slow to respond.';
@@ -221,8 +169,8 @@ const clearResults = () => {
 
 onMounted(() => {
     loadStats();
-    loadRecentVerifications();
-
+    loadChart();
+    
     // Refresh stats every 30 seconds
     setInterval(loadStats, 30000);
 });
@@ -493,137 +441,32 @@ onMounted(() => {
                     </div>
                 </div>
 
-                <!-- Recent Verifications -->
-                <div class="bg-white dark:bg-gray-800 overflow-hidden shadow-xl sm:rounded-lg">
-                    <div class="p-6 border-b border-gray-200 dark:border-gray-700">
-                        <h3 class="text-lg font-semibold">Recent Verifications</h3>
-                    </div>
-                    <div class="divide-y divide-gray-200 dark:divide-gray-700">
-                        <!-- Bulk Jobs (Groups) -->
-                        <div v-for="bulkJob in bulkJobs" :key="'bulk-' + bulkJob.id" class="p-6">
+                <!-- Chart -->
+                <div class="bg-white dark:bg-gray-800 overflow-hidden shadow-sm sm:rounded-lg mb-8">
+                    <div class="p-6">
+                        <h3 class="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+                            Verifications Over Time (Last 30 Days)
+                        </h3>
+                        <div v-if="chartData.length === 0" class="text-center py-8 text-gray-500 dark:text-gray-400">
+                            No data available yet
+                        </div>
+                        <div v-else class="h-64 flex items-end justify-between gap-2">
                             <div
-                                @click="toggleBulkJob(bulkJob.id)"
-                                class="cursor-pointer flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 p-3 rounded-lg transition"
+                                v-for="(item, index) in chartData"
+                                :key="index"
+                                class="flex-1 flex flex-col items-center"
                             >
-                                <div class="flex-1">
-                                    <div class="flex items-center gap-3 mb-2">
-                                        <svg
-                                            :class="['w-5 h-5 transition-transform', expandedBulkJobs.has(bulkJob.id) ? 'rotate-90' : '']"
-                                            fill="none"
-                                            stroke="currentColor"
-                                            viewBox="0 0 24 24"
-                                        >
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
-                                        </svg>
-                                        <h4 class="font-semibold">{{ bulkJob.filename || `Bulk Job #${bulkJob.id}` }}</h4>
-                                        <span :class="['px-2 py-1 text-xs rounded-full', getBulkJobStatusColor(bulkJob.status)]">
-                                            {{ bulkJob.status }}
-                                        </span>
-                                    </div>
-                                    <div class="flex items-center gap-6 text-sm text-gray-600 dark:text-gray-400 ml-8">
-                                        <span>Total: <strong>{{ bulkJob.total_emails }}</strong></span>
-                                        <span class="text-green-600">Valid: <strong>{{ bulkJob.stats.valid }}</strong></span>
-                                        <span class="text-red-600">Invalid: <strong>{{ bulkJob.stats.invalid }}</strong></span>
-                                        <span class="text-orange-600">Risky: <strong>{{ bulkJob.stats.risky }}</strong></span>
-                                        <span class="text-gray-500">Progress: <strong>{{ Math.round(bulkJob.progress_percentage || 0) }}%</strong></span>
-                                        <span class="text-gray-500 text-xs">
-                                            {{ new Date(bulkJob.created_at).toLocaleString() }}
-                                        </span>
-                                    </div>
+                                <div class="w-full flex flex-col items-center justify-end h-full">
+                                    <div
+                                        class="w-full bg-blue-500 rounded-t hover:bg-blue-600 transition-colors cursor-pointer"
+                                        :style="{ height: chartData.length > 0 ? `${(item.total / Math.max(...chartData.map(d => d.total))) * 100}%` : '0%' }"
+                                        :title="`${item.date}: ${item.total} total (${item.valid} valid, ${item.invalid} invalid, ${item.risky} risky)`"
+                                    ></div>
+                                </div>
+                                <div class="text-xs text-gray-500 dark:text-gray-400 mt-2 transform -rotate-45 origin-top-left whitespace-nowrap">
+                                    {{ new Date(item.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) }}
                                 </div>
                             </div>
-
-                            <!-- Expanded Email List -->
-                            <div v-if="expandedBulkJobs.has(bulkJob.id)" class="mt-4 ml-8">
-                                <div v-if="loadingBulkEmails.has(bulkJob.id)" class="text-center py-4 text-gray-500">
-                                    Loading emails...
-                                </div>
-                                <div v-else-if="bulkJobEmails[bulkJob.id] && bulkJobEmails[bulkJob.id].length > 0" class="overflow-x-auto">
-                                    <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                                        <thead class="bg-gray-50 dark:bg-gray-900">
-                                            <tr>
-                                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
-                                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Score</th>
-                                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Checks</th>
-                                                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Date</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                                            <tr v-for="email in bulkJobEmails[bulkJob.id]" :key="email.id">
-                                                <td class="px-4 py-3 text-sm">{{ email.email }}</td>
-                                                <td class="px-4 py-3">
-                                                    <span :class="['px-2 py-1 text-xs rounded-full', getStatusColor(email.status)]">
-                                                        {{ email.status }}
-                                                    </span>
-                                                </td>
-                                                <td class="px-4 py-3 text-sm">{{ email.score }}</td>
-                                                <td class="px-4 py-3 text-xs">
-                                                    <div class="flex gap-2">
-                                                        <span :class="email.checks?.syntax ? 'text-green-600' : 'text-red-600'">S</span>
-                                                        <span :class="email.checks?.mx ? 'text-green-600' : 'text-red-600'">M</span>
-                                                        <span :class="email.checks?.smtp ? 'text-green-600' : 'text-red-600'">SMTP</span>
-                                                        <span :class="email.checks?.disposable ? 'text-red-600' : 'text-green-600'">D</span>
-                                                        <span :class="email.checks?.role ? 'text-orange-600' : 'text-green-600'">R</span>
-                                                    </div>
-                                                </td>
-                                                <td class="px-4 py-3 text-sm text-gray-500">
-                                                    {{ new Date(email.created_at).toLocaleString() }}
-                                                </td>
-                                            </tr>
-                                        </tbody>
-                                    </table>
-                                </div>
-                                <div v-else class="text-center py-4 text-gray-500">
-                                    No emails found
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Individual Verifications (Not part of bulk jobs) -->
-                        <div v-if="individualVerifications.length > 0" class="p-6">
-                            <h4 class="font-semibold mb-4">Individual Verifications</h4>
-                            <div class="overflow-x-auto">
-                                <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                                    <thead class="bg-gray-50 dark:bg-gray-900">
-                                        <tr>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Score</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Checks</th>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                                        <tr v-for="verification in individualVerifications" :key="verification.id">
-                                            <td class="px-6 py-4 whitespace-nowrap text-sm">{{ verification.email }}</td>
-                                            <td class="px-6 py-4 whitespace-nowrap">
-                                                <span :class="['px-2 py-1 text-xs rounded-full', getStatusColor(verification.status)]">
-                                                    {{ verification.status }}
-                                                </span>
-                                            </td>
-                                            <td class="px-6 py-4 whitespace-nowrap text-sm">{{ verification.score }}</td>
-                                            <td class="px-6 py-4 whitespace-nowrap text-xs">
-                                                <div class="flex gap-2">
-                                                    <span :class="verification.checks?.syntax ? 'text-green-600' : 'text-red-600'">S</span>
-                                                    <span :class="verification.checks?.mx ? 'text-green-600' : 'text-red-600'">M</span>
-                                                    <span :class="verification.checks?.smtp ? 'text-green-600' : 'text-red-600'">SMTP</span>
-                                                    <span :class="verification.checks?.disposable ? 'text-red-600' : 'text-green-600'">D</span>
-                                                    <span :class="verification.checks?.role ? 'text-orange-600' : 'text-green-600'">R</span>
-                                                </div>
-                                            </td>
-                                            <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                                                {{ new Date(verification.created_at).toLocaleString() }}
-                                            </td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <!-- Empty State -->
-                        <div v-if="bulkJobs.length === 0 && individualVerifications.length === 0" class="p-6 text-center text-gray-500">
-                            No verifications yet
                         </div>
                     </div>
                 </div>

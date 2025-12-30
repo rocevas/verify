@@ -40,6 +40,7 @@ Route::middleware([
     // Dashboard API routes
     Route::prefix('api/dashboard')->group(function () {
         Route::get('/stats', [\App\Http\Controllers\DashboardController::class, 'stats']);
+        Route::get('/chart', [\App\Http\Controllers\DashboardController::class, 'chart']);
         Route::get('/recent', [\App\Http\Controllers\DashboardController::class, 'recent']);
         Route::get('/bulk-jobs/{bulkJob}/emails', [\App\Http\Controllers\DashboardController::class, 'bulkJobEmails']);
     });
