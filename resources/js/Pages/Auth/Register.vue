@@ -11,6 +11,7 @@ import TextInput from '@/Components/TextInput.vue';
 const form = useForm({
     name: '',
     email: '',
+    company: '',
     password: '',
     password_confirmation: '',
     terms: false,
@@ -33,6 +34,20 @@ const submit = () => {
 
         <form @submit.prevent="submit">
             <div>
+                <InputLabel for="company" value="Company" />
+                <TextInput
+                    id="company"
+                    v-model="form.company"
+                    type="text"
+                    class="mt-1 block w-full"
+                    required
+                    autofocus
+                    autocomplete="company"
+                />
+                <InputError class="mt-2" :message="form.errors.company" />
+            </div>
+
+            <div class="mt-4">
                 <InputLabel for="name" value="Name" />
                 <TextInput
                     id="name"
@@ -72,18 +87,18 @@ const submit = () => {
                 <InputError class="mt-2" :message="form.errors.password" />
             </div>
 
-            <div class="mt-4">
-                <InputLabel for="password_confirmation" value="Confirm Password" />
-                <TextInput
-                    id="password_confirmation"
-                    v-model="form.password_confirmation"
-                    type="password"
-                    class="mt-1 block w-full"
-                    required
-                    autocomplete="new-password"
-                />
-                <InputError class="mt-2" :message="form.errors.password_confirmation" />
-            </div>
+<!--            <div class="mt-4">-->
+<!--                <InputLabel for="password_confirmation" value="Confirm Password" />-->
+<!--                <TextInput-->
+<!--                    id="password_confirmation"-->
+<!--                    v-model="form.password_confirmation"-->
+<!--                    type="password"-->
+<!--                    class="mt-1 block w-full"-->
+<!--                    required-->
+<!--                    autocomplete="new-password"-->
+<!--                />-->
+<!--                <InputError class="mt-2" :message="form.errors.password_confirmation" />-->
+<!--            </div>-->
 
             <div v-if="$page.props.jetstream.hasTermsAndPrivacyPolicyFeature" class="mt-4">
                 <InputLabel for="terms">
