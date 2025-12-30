@@ -37,6 +37,9 @@ Route::middleware([
         return Inertia::render('BulkVerificationDetail', ['bulkJobId' => $id]);
     })->name('verifications.bulk');
     
+    // Monitors page
+    Route::get('/monitors', [\App\Http\Controllers\MonitorController::class, 'index'])->name('monitors');
+    
     // Dashboard API routes
     Route::prefix('api/dashboard')->group(function () {
         Route::get('/stats', [\App\Http\Controllers\DashboardController::class, 'stats']);
@@ -71,5 +74,25 @@ Route::middleware([
         Route::get('/jobs', [\App\Http\Controllers\Api\BulkVerificationController::class, 'list']);
         Route::get('/jobs/{id}', [\App\Http\Controllers\Api\BulkVerificationController::class, 'status']);
         Route::get('/jobs/{id}/download', [\App\Http\Controllers\Api\BulkVerificationController::class, 'download']);
+    });
+    
+    // Monitor routes (for UI)
+    Route::prefix('api/monitors')->group(function () {
+        // Blocklist monitors
+        Route::get('/blocklist', [\App\Http\Controllers\Api\MonitorController::class, 'blocklistIndex']);
+        Route::post('/blocklist', [\App\Http\Controllers\Api\MonitorController::class, 'blocklistStore']);
+        Route::put('/blocklist/{id}', [\App\Http\Controllers\Api\MonitorController::class, 'blocklistUpdate']);
+        Route::delete('/blocklist/{id}', [\App\Http\Controllers\Api\MonitorController::class, 'blocklistDestroy']);
+        Route::post('/blocklist/{id}/check', [\App\Http\Controllers\Api\MonitorController::class, 'blocklistCheckNow']);
+        
+        // DMARC monitors
+        Route::get('/dmarc', [\App\Http\Controllers\Api\MonitorController::class, 'dmarcIndex']);
+        Route::post('/dmarc', [\App\Http\Controllers\Api\MonitorController::class, 'dmarcStore']);
+        Route::put('/dmarc/{id}', [\App\Http\Controllers\Api\MonitorController::class, 'dmarcUpdate']);
+        Route::delete('/dmarc/{id}', [\App\Http\Controllers\Api\MonitorController::class, 'dmarcDestroy']);
+        Route::post('/dmarc/{id}/check', [\App\Http\Controllers\Api\MonitorController::class, 'dmarcCheckNow']);
+        
+        // Check results
+        Route::get('/{type}/{id}/results', [\App\Http\Controllers\Api\MonitorController::class, 'checkResults']);
     });
 });

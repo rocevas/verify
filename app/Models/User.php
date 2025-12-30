@@ -72,4 +72,14 @@ class User extends Authenticatable
     {
         return $this->hasMany(EmailVerification::class);
     }
+
+    public function blocklistMonitors(): HasMany
+    {
+        return $this->hasMany(BlocklistMonitor::class);
+    }
+
+    public function dmarcMonitors(): HasMany
+    {
+        return $this->hasMany(DmarcMonitor::class);
+    }
 }
