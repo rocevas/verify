@@ -84,7 +84,8 @@ class ProcessBulkVerificationJob implements ShouldQueue
                     $this->bulkJob->user_id,
                     $this->bulkJob->team_id,
                     $this->bulkJob->api_key_id,
-                    $this->bulkJob->id // Pass bulk job ID
+                    $this->bulkJob->id, // Pass bulk job ID
+                    $this->bulkJob->source ?? 'csv' // Use bulk job source, default to 'csv'
                 )->onQueue('default');
             }
 

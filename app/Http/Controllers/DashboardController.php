@@ -189,4 +189,102 @@ class DashboardController extends Controller
 
         return response()->json($emails);
     }
+
+    public function bulkJobDetail(int $bulkJobId, Request $request): JsonResponse
+    {
+        $user = $request->user();
+        $team = $user->currentTeam;
+        $teamId = $team?->id;
+
+        if (!$teamId) {
+            return response()->json(['error' => 'No team selected'], 403);
+        }
+
+        // Verify the bulk job belongs to the team
+        $bulkJob = BulkVerificationJob::where('id', $bulkJobId)
+            ->where('team_id', $teamId)
+            ->firstOrFail();
+
+        // Get stats for this bulk job
+        $stats = EmailVerification::where('bulk_verification_job_id', $bulkJobId)
+            ->selectRaw('
+                COUNT(*) as total,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
+                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
+            ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
+            ->first();
+
+        $percentages = [
+            'valid' => $stats->total > 0 ? round(($stats->valid / $stats->total) * 100, 2) : 0,
+            'invalid' => $stats->total > 0 ? round(($stats->invalid / $stats->total) * 100, 2) : 0,
+            'risky' => $stats->total > 0 ? round(($stats->risky / $stats->total) * 100, 2) : 0,
+        ];
+
+        return response()->json([
+            'bulk_job' => [
+                'id' => $bulkJob->id,
+                'filename' => $bulkJob->filename,
+                'source' => $bulkJob->source,
+                'status' => $bulkJob->status,
+                'total_emails' => $bulkJob->total_emails,
+                'processed_emails' => $bulkJob->processed_emails ?? 0,
+                'progress_percentage' => $bulkJob->progress_percentage,
+                'created_at' => $bulkJob->created_at?->toIso8601String(),
+                'completed_at' => $bulkJob->completed_at?->toIso8601String(),
+            ],
+            'stats' => [
+                'total' => $stats->total ?? 0,
+                'valid' => $stats->valid ?? 0,
+                'invalid' => $stats->invalid ?? 0,
+                'risky' => $stats->risky ?? 0,
+                'percentages' => $percentages,
+            ],
+        ]);
+    }
+
+    public function bulkJobEmailsPaginated(int $bulkJobId, Request $request): JsonResponse
+    {
+        $user = $request->user();
+        $team = $user->currentTeam;
+        $teamId = $team?->id;
+
+        if (!$teamId) {
+            return response()->json(['error' => 'No team selected'], 403);
+        }
+
+        // Verify the bulk job belongs to the team
+        $bulkJob = BulkVerificationJob::where('id', $bulkJobId)
+            ->where('team_id', $teamId)
+            ->firstOrFail();
+
+        $perPage = $request->get('per_page', 50);
+        $page = $request->get('page', 1);
+
+        $emails = EmailVerification::where('bulk_verification_job_id', $bulkJobId)
+            ->orderBy('created_at', 'desc')
+            ->paginate($perPage, ['*'], 'page', $page);
+
+        $data = $emails->map(function ($verification) {
+            return [
+                'id' => $verification->id,
+                'email' => $verification->email,
+                'status' => $verification->status,
+                'score' => $verification->score,
+                'checks' => $verification->checks,
+                'error' => $verification->error,
+                'created_at' => $verification->created_at?->toIso8601String(),
+            ];
+        });
+
+        return response()->json([
+            'data' => $data,
+            'pagination' => [
+                'current_page' => $emails->currentPage(),
+                'last_page' => $emails->lastPage(),
+                'per_page' => $emails->perPage(),
+                'total' => $emails->total(),
+            ],
+        ]);
+    }
 }

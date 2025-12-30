@@ -40,10 +40,14 @@ class BulkVerificationController extends Controller
             fclose($handle);
         }
 
+        // Determine source: 'csv' if using PersonalAccessToken, 'ui' if using session (TransientToken)
+        $source = ($token && $token instanceof \Laravel\Sanctum\PersonalAccessToken) ? 'csv' : 'ui';
+
         $job = BulkVerificationJob::create([
             'user_id' => $user->id,
             'team_id' => $teamId,
             'api_key_id' => $tokenId, // Store token ID for reference (null for session-based auth)
+            'source' => $source,
             'filename' => $filename,
             'file_path' => $path,
             'total_emails' => $totalEmails,

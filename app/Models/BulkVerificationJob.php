@@ -14,6 +14,7 @@ class BulkVerificationJob extends Model
         'user_id',
         'team_id',
         'api_key_id',
+        'source',
         'filename',
         'file_path',
         'total_emails',

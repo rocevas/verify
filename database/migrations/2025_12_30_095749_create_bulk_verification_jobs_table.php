@@ -16,6 +16,7 @@ return new class extends Migration
             $table->foreignId('user_id')->constrained()->nullOnDelete();
             $table->foreignId('team_id')->constrained()->cascadeOnDelete();
             $table->unsignedBigInteger('api_key_id')->nullable()->comment('Sanctum token ID reference');
+            $table->string('source')->nullable();
             $table->string('filename');
             $table->string('file_path')->nullable();
             $table->integer('total_emails')->default(0);

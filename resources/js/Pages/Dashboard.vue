@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted } from 'vue';
+import { router } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
 import PrimaryButton from '@/Components/PrimaryButton.vue';
 import SecondaryButton from '@/Components/SecondaryButton.vue';
@@ -74,7 +75,7 @@ const loadBulkJobEmails = async (bulkJobId) => {
     if (loadingBulkEmails.value.has(bulkJobId)) {
         return;
     }
-    
+
     loadingBulkEmails.value.add(bulkJobId);
     try {
         const response = await axios.get(`/api/dashboard/bulk-jobs/${bulkJobId}/emails`, {
@@ -131,7 +132,7 @@ const verifySingleEmail = async () => {
 
         verificationResult.value = response.data;
         singleEmail.value = '';
-        
+
         // Refresh stats and recent verifications
         await loadStats();
         await loadRecentVerifications();
@@ -183,12 +184,14 @@ const verifyBatchEmails = async () => {
         });
 
         batchResults.value = response.data.results || [];
-        
-        // If bulk_job_id is returned, we can show it was grouped
+
+        // If bulk_job_id is returned, redirect to bulk job detail page
         if (response.data.bulk_job_id) {
-            console.log('Batch verification completed with bulk_job_id:', response.data.bulk_job_id);
+            // Redirect to bulk job detail page
+            router.visit(`/verifications/bulk/${response.data.bulk_job_id}`);
+            return;
         }
-        
+
         // Refresh stats and recent verifications
         await loadStats();
         await loadRecentVerifications();
@@ -196,9 +199,15 @@ const verifyBatchEmails = async () => {
         if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
             error.value = 'Batch verification timed out. Some email servers may be slow to respond.';
         } else {
-            error.value = err.response?.data?.message || err.response?.data?.error || 'Failed to verify emails';
+            const errorMessage = err.response?.data?.error || err.response?.data?.message || err.message || 'Failed to verify emails';
+            error.value = errorMessage;
+            console.error('Batch verification error:', {
+                message: errorMessage,
+                response: err.response?.data,
+                status: err.response?.status,
+                fullError: err
+            });
         }
-        console.error('Batch verification error:', err);
     } finally {
         verifying.value = false;
     }
@@ -213,7 +222,7 @@ const clearResults = () => {
 onMounted(() => {
     loadStats();
     loadRecentVerifications();
-    
+
     // Refresh stats every 30 seconds
     setInterval(loadStats, 30000);
 });
@@ -318,7 +327,7 @@ onMounted(() => {
                         <h3 class="text-lg font-semibold">Verify Email Addresses</h3>
                         <p class="text-sm text-gray-500 mt-1">Check if email addresses are valid and deliverable</p>
                     </div>
-                    
+
                     <div class="p-6">
                         <!-- Mode Toggle -->
                         <div class="mb-6 flex gap-4 border-b border-gray-200 dark:border-gray-700">
@@ -382,7 +391,7 @@ onMounted(() => {
                                         {{ verificationResult.status }}
                                     </span>
                                 </div>
-                                
+
                                 <div class="grid grid-cols-2 gap-4 mb-4">
                                     <div>
                                         <p class="text-sm text-gray-600 dark:text-gray-400">Email</p>
@@ -484,19 +493,6 @@ onMounted(() => {
                     </div>
                 </div>
 
-                <!-- API Tokens Info Section -->
-                <div class="bg-white dark:bg-gray-800 overflow-hidden shadow-xl sm:rounded-lg mb-8">
-                    <div class="p-6 border-b border-gray-200 dark:border-gray-700 flex justify-between items-center">
-                        <div>
-                            <h3 class="text-lg font-semibold">API Tokens</h3>
-                            <p class="text-sm text-gray-500 mt-1">Manage your API tokens for authentication</p>
-                        </div>
-                        <a href="/user/api-tokens" class="inline-flex items-center px-4 py-2 bg-gray-800 dark:bg-gray-200 border border-transparent rounded-md font-semibold text-xs text-white dark:text-gray-800 uppercase tracking-widest hover:bg-gray-700 dark:hover:bg-white focus:bg-gray-700 dark:focus:bg-white active:bg-gray-900 dark:active:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 dark:focus:ring-offset-gray-800 transition ease-in-out duration-150">
-                            Manage Tokens
-                        </a>
-                    </div>
-                </div>
-
                 <!-- Recent Verifications -->
                 <div class="bg-white dark:bg-gray-800 overflow-hidden shadow-xl sm:rounded-lg">
                     <div class="p-6 border-b border-gray-200 dark:border-gray-700">
@@ -505,16 +501,16 @@ onMounted(() => {
                     <div class="divide-y divide-gray-200 dark:divide-gray-700">
                         <!-- Bulk Jobs (Groups) -->
                         <div v-for="bulkJob in bulkJobs" :key="'bulk-' + bulkJob.id" class="p-6">
-                            <div 
+                            <div
                                 @click="toggleBulkJob(bulkJob.id)"
                                 class="cursor-pointer flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-900 p-3 rounded-lg transition"
                             >
                                 <div class="flex-1">
                                     <div class="flex items-center gap-3 mb-2">
-                                        <svg 
+                                        <svg
                                             :class="['w-5 h-5 transition-transform', expandedBulkJobs.has(bulkJob.id) ? 'rotate-90' : '']"
-                                            fill="none" 
-                                            stroke="currentColor" 
+                                            fill="none"
+                                            stroke="currentColor"
                                             viewBox="0 0 24 24"
                                         >
                                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />

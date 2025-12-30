@@ -7,6 +7,7 @@ use App\Models\BulkVerificationJob;
 use App\Services\EmailVerificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 class EmailVerificationController extends Controller
 {
@@ -37,8 +38,8 @@ class EmailVerificationController extends Controller
         // Get token ID only if it's a PersonalAccessToken (not TransientToken from session)
         $tokenId = ($token && $token instanceof \Laravel\Sanctum\PersonalAccessToken) ? $token->id : null;
 
-        // Determine source: 'api' for API calls, 'ui' for web interface
-        $source = $request->is('api/*') ? 'api' : 'ui';
+        // Determine source: 'api' if using PersonalAccessToken, 'ui' if using session (TransientToken)
+        $source = ($token && $token instanceof \Laravel\Sanctum\PersonalAccessToken) ? 'api' : 'ui';
 
         if ($async) {
             // Dispatch to queue
@@ -58,11 +59,19 @@ class EmailVerificationController extends Controller
 
     public function batch(Request $request): JsonResponse
     {
-        $request->validate([
-            'emails' => 'required|array|max:100',
-            'emails.*' => 'required|email',
-            'async' => 'sometimes|boolean',
-        ]);
+        try {
+            $request->validate([
+                'emails' => 'required|array|max:100',
+                'emails.*' => 'required|email',
+                'async' => 'sometimes|boolean',
+            ]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'error' => 'Validation failed',
+                'message' => $e->getMessage(),
+                'errors' => $e->errors(),
+            ], 422);
+        }
 
         $emails = $request->input('emails');
         $async = $request->boolean('async', false);
@@ -75,24 +84,39 @@ class EmailVerificationController extends Controller
         $team = $user->currentTeam;
         $userId = $user->id;
         $teamId = $team?->id;
+        
+        if (!$teamId) {
+            return response()->json(['error' => 'No team selected. Please select a team first.'], 403);
+        }
+        
         $token = $request->user()->currentAccessToken();
         // Get token ID only if it's a PersonalAccessToken (not TransientToken from session)
         $tokenId = ($token && $token instanceof \Laravel\Sanctum\PersonalAccessToken) ? $token->id : null;
 
-        // Determine source: 'api' for API calls, 'ui' for web interface
-        $source = $request->is('api/*') ? 'api' : 'ui';
+        // Determine source: 'api' if using PersonalAccessToken, 'ui' if using session (TransientToken)
+        $source = ($token && $token instanceof \Laravel\Sanctum\PersonalAccessToken) ? 'api' : 'ui';
 
         // Create a BulkVerificationJob for UI batch verification
-        $bulkJob = BulkVerificationJob::create([
-            'user_id' => $user->id,
-            'team_id' => $teamId,
-            'api_key_id' => $tokenId,
-            'filename' => 'Batch Verification - ' . now()->format('Y-m-d H:i:s'),
-            'file_path' => null, // No file for UI batch
-            'total_emails' => count($emails),
-            'status' => 'processing',
-            'started_at' => now(),
-        ]);
+        try {
+            $bulkJob = BulkVerificationJob::create([
+                'user_id' => $user->id,
+                'team_id' => $teamId,
+                'api_key_id' => $tokenId,
+                'source' => $source,
+                'filename' => 'Batch Verification - ' . now()->format('Y-m-d H:i:s'),
+                'file_path' => null, // No file for UI batch
+                'total_emails' => count($emails),
+                'status' => 'processing',
+                'started_at' => now(),
+            ]);
+        } catch (\Exception $e) {
+            \Log::error('Failed to create bulk job', [
+                'error' => $e->getMessage(),
+                'user_id' => $user->id,
+                'team_id' => $teamId,
+            ]);
+            return response()->json(['error' => 'Failed to create verification job: ' . $e->getMessage()], 500);
+        }
 
         if ($async) {
             foreach ($emails as $email) {

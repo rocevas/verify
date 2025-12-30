@@ -51,6 +51,9 @@ const logout = () => {
                                 <NavLink :href="route('dashboard')" :active="route().current('dashboard')">
                                     Dashboard
                                 </NavLink>
+                                <NavLink :href="route('verifications')" :active="route().current('verifications') || route().current('verifications.bulk')">
+                                    Verifications
+                                </NavLink>
                             </div>
                         </div>
 
@@ -201,6 +204,9 @@ const logout = () => {
                     <div class="pt-2 pb-3 space-y-1">
                         <ResponsiveNavLink :href="route('dashboard')" :active="route().current('dashboard')">
                             Dashboard
+                        </ResponsiveNavLink>
+                        <ResponsiveNavLink :href="route('verifications')" :active="route().current('verifications') || route().current('verifications.bulk')">
+                            Verifications
                         </ResponsiveNavLink>
                     </div>
 
