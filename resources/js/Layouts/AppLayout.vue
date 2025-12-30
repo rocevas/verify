@@ -33,7 +33,7 @@ const logout = () => {
 
         <Banner />
 
-        <div class="min-h-screen bg-gray-100 dark:bg-gray-900">
+        <div class="min-h-screen bg-gray-100 dark:bg-gray-900 text-white">
             <nav class="bg-white dark:bg-gray-800 border-b border-gray-100 dark:border-gray-700">
                 <!-- Primary Navigation Menu -->
                 <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -55,7 +55,7 @@ const logout = () => {
                         </div>
 
                         <div class="hidden sm:flex sm:items-center sm:ms-6">
-                            <div class="ms-3 relative">
+                            <div v-if="false" class="ms-3 relative">
                                 <!-- Teams Dropdown -->
                                 <Dropdown v-if="$page.props.jetstream.hasTeamFeatures" align="right" width="60">
                                     <template #trigger>
@@ -117,9 +117,13 @@ const logout = () => {
                             <div class="ms-3 relative">
                                 <Dropdown align="right" width="48">
                                     <template #trigger>
-                                        <button v-if="$page.props.jetstream.managesProfilePhotos" class="flex text-sm border-2 border-transparent rounded-full focus:outline-none focus:border-gray-300 transition">
-                                            <img class="size-8 rounded-full object-cover" :src="$page.props.auth.user.profile_photo_url" :alt="$page.props.auth.user.name">
-                                        </button>
+                                        <div v-if="$page.props.jetstream.managesProfilePhotos" class="flex items-center gap-2">
+                                            {{ $page.props.auth.user.name }}
+
+                                            <button  class="flex text-sm border-2 border-transparent rounded-full focus:outline-none focus:border-gray-300 transition">
+                                                <img class="size-8 rounded-full object-cover" :src="$page.props.auth.user.profile_photo_url" :alt="$page.props.auth.user.name">
+                                            </button>
+                                        </div>
 
                                         <span v-else class="inline-flex rounded-md">
                                             <button type="button" class="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 hover:text-gray-700 dark:hover:text-gray-300 focus:outline-none focus:bg-gray-50 dark:focus:bg-gray-700 active:bg-gray-50 dark:active:bg-gray-700 transition ease-in-out duration-150">
@@ -140,6 +144,10 @@ const logout = () => {
 
                                         <DropdownLink :href="route('profile.show')">
                                             Profile
+                                        </DropdownLink>
+
+                                        <DropdownLink v-if="$page.props.jetstream.hasTeamFeatures" :href="route('teams.show', $page.props.auth.user.current_team)">
+                                            Team Settings
                                         </DropdownLink>
 
                                         <DropdownLink v-if="$page.props.jetstream.hasApiFeatures" :href="route('api-tokens.index')">

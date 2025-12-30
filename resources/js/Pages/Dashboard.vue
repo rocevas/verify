@@ -47,8 +47,8 @@ const loadRecentVerifications = async () => {
         });
         bulkJobs.value = response.data.bulk_jobs || [];
         individualVerifications.value = response.data.individual_verifications || [];
-        // Keep old format for backward compatibility - use all_verifications if available
-        recentVerifications.value = response.data.all_verifications || [
+        // Keep old format for backward compatibility
+        recentVerifications.value = [
             ...bulkJobs.value,
             ...individualVerifications.value,
         ];

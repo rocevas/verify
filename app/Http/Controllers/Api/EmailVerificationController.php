@@ -7,8 +7,6 @@ use App\Models\BulkVerificationJob;
 use App\Services\EmailVerificationService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Queue;
-use Illuminate\Validation\ValidationException;
 
 class EmailVerificationController extends Controller
 {
@@ -39,9 +37,12 @@ class EmailVerificationController extends Controller
         // Get token ID only if it's a PersonalAccessToken (not TransientToken from session)
         $tokenId = ($token && $token instanceof \Laravel\Sanctum\PersonalAccessToken) ? $token->id : null;
 
+        // Determine source: 'api' for API calls, 'ui' for web interface
+        $source = $request->is('api/*') ? 'api' : 'ui';
+
         if ($async) {
             // Dispatch to queue
-            \App\Jobs\VerifyEmailJob::dispatch($email, $userId, $teamId, $tokenId);
+            \App\Jobs\VerifyEmailJob::dispatch($email, $user->id, $teamId, $tokenId, null, $source);
             
             return response()->json([
                 'message' => 'Verification queued',
@@ -50,7 +51,7 @@ class EmailVerificationController extends Controller
         }
 
         // Synchronous verification
-        $result = $this->verificationService->verify($email, $userId, $teamId, $tokenId);
+        $result = $this->verificationService->verify($email, $user->id, $teamId, $tokenId, null, $source);
 
         return response()->json($result);
     }
@@ -78,9 +79,12 @@ class EmailVerificationController extends Controller
         // Get token ID only if it's a PersonalAccessToken (not TransientToken from session)
         $tokenId = ($token && $token instanceof \Laravel\Sanctum\PersonalAccessToken) ? $token->id : null;
 
+        // Determine source: 'api' for API calls, 'ui' for web interface
+        $source = $request->is('api/*') ? 'api' : 'ui';
+
         // Create a BulkVerificationJob for UI batch verification
         $bulkJob = BulkVerificationJob::create([
-            'user_id' => $userId,
+            'user_id' => $user->id,
             'team_id' => $teamId,
             'api_key_id' => $tokenId,
             'filename' => 'Batch Verification - ' . now()->format('Y-m-d H:i:s'),
@@ -92,7 +96,7 @@ class EmailVerificationController extends Controller
 
         if ($async) {
             foreach ($emails as $email) {
-                \App\Jobs\VerifyEmailJob::dispatch($email, $userId, $teamId, $tokenId, $bulkJob->id);
+                \App\Jobs\VerifyEmailJob::dispatch($email, $user->id, $teamId, $tokenId, $bulkJob->id, $source);
             }
 
             // Dispatch completion check job
@@ -113,7 +117,7 @@ class EmailVerificationController extends Controller
         $riskyCount = 0;
 
         foreach ($emails as $email) {
-            $result = $this->verificationService->verify($email, $userId, $teamId, $tokenId, $bulkJob->id);
+            $result = $this->verificationService->verify($email, $user->id, $teamId, $tokenId, $bulkJob->id, $source);
             $results[] = $result;
 
             // Update counts

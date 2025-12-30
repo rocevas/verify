@@ -7,7 +7,6 @@ use App\Models\BulkVerificationJob;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Validation\ValidationException;
 
 class BulkVerificationController extends Controller
 {
@@ -19,11 +18,10 @@ class BulkVerificationController extends Controller
 
         $user = $request->user();
         $team = $user->currentTeam;
-        $userId = $user->id;
         $teamId = $team?->id;
-        $token = $request->user()->currentAccessToken();
+        $token = $user->currentAccessToken();
         // Get token ID only if it's a PersonalAccessToken (not TransientToken from session)
-        $tokenId = ($token && $token instanceof \Laravel\Sanctum\PersonalAccessToken) ? $token->id : null;
+        $tokenId = ($token instanceof \Laravel\Sanctum\PersonalAccessToken) ? $token->id : null;
 
         $file = $request->file('file');
         $filename = $file->getClientOriginalName();
@@ -43,7 +41,7 @@ class BulkVerificationController extends Controller
         }
 
         $job = BulkVerificationJob::create([
-            'user_id' => $userId,
+            'user_id' => $user->id,
             'team_id' => $teamId,
             'api_key_id' => $tokenId, // Store token ID for reference (null for session-based auth)
             'filename' => $filename,

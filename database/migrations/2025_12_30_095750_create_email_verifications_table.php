@@ -17,6 +17,7 @@ return new class extends Migration
             $table->foreignId('team_id')->nullable()->constrained()->cascadeOnDelete();
             $table->unsignedBigInteger('api_key_id')->nullable()->comment('Sanctum token ID reference');
             $table->foreignId('bulk_verification_job_id')->nullable()->constrained('bulk_verification_jobs')->nullOnDelete();
+            $table->string('source')->nullable();
             $table->string('email')->index();
             $table->string('account')->nullable();
             $table->string('domain')->nullable();
@@ -24,7 +25,7 @@ return new class extends Migration
             $table->json('checks')->nullable();
             $table->integer('score')->nullable();
             $table->text('error')->nullable();
-            $table->string('file_path')->nullable();
+            $table->string('file_path')->nullable()->comment('Optional file path for future use');
             $table->timestamp('verified_at')->nullable();
             $table->softDeletes();
             $table->timestamps();

@@ -15,6 +15,7 @@ class EmailVerification extends Model
         'team_id',
         'api_key_id',
         'bulk_verification_job_id',
+        'source',
         'email',
         'account',
         'domain',

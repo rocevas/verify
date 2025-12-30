@@ -75,15 +75,12 @@ class EmailVerificationService
             $retryAfter = 60;
             
             // If we're in a queue job context, throw exception to trigger retry
-            // Check if we're running in a queue worker by checking if VerifyEmailJob is in call stack
-            $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 10);
-            $isQueueJob = collect($backtrace)->contains(function ($trace) {
-                return isset($trace['class']) && 
-                       str_contains($trace['class'], 'VerifyEmailJob');
-            });
-            
-            if ($isQueueJob) {
-                throw new SmtpRateLimitExceededException($domain, $retryAfter);
+            // Optimize: Check if VerifyEmailJob is in call stack (limit to 5 levels for performance)
+            $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 5);
+            foreach ($backtrace as $trace) {
+                if (isset($trace['class']) && str_contains($trace['class'], 'VerifyEmailJob')) {
+                    throw new SmtpRateLimitExceededException($domain, $retryAfter);
+                }
             }
             
             // Otherwise, just skip SMTP check (synchronous call)
@@ -106,7 +103,7 @@ class EmailVerificationService
         return true;
     }
 
-    public function verify(string $email, ?int $userId = null, ?int $teamId = null, ?int $tokenId = null, ?int $bulkJobId = null): array
+    public function verify(string $email, ?int $userId = null, ?int $teamId = null, ?int $tokenId = null, ?int $bulkJobId = null, ?string $source = null): array
     {
         $result = [
             'email' => $email,
@@ -134,7 +131,7 @@ class EmailVerificationService
                 $result['error'] = 'Invalid email format';
                 $result['score'] = 0;
                 // Save even invalid emails for tracking
-                $this->saveVerification($result, $userId, $teamId, $tokenId, ['account' => null, 'domain' => null], $bulkJobId);
+                $this->saveVerification($result, $userId, $teamId, $tokenId, ['account' => null, 'domain' => null], $bulkJobId, $source);
                 return $result;
             }
 
@@ -147,7 +144,7 @@ class EmailVerificationService
                 $result['status'] = 'invalid';
                 $result['error'] = 'Invalid email syntax';
                 $result['score'] = 0;
-                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId);
+                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
 
@@ -156,7 +153,7 @@ class EmailVerificationService
             if ($result['checks']['disposable']) {
                 $result['status'] = 'do_not_mail';
                 $result['score'] = 0;
-                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId);
+                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
 
@@ -172,7 +169,7 @@ class EmailVerificationService
                 $result['status'] = 'invalid';
                 $result['error'] = 'No MX records found';
                 $result['score'] = $this->calculateScore($result['checks']);
-                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId);
+                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
 
@@ -218,7 +215,7 @@ class EmailVerificationService
             }
 
             // Save to database
-            $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId);
+            $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
 
         } catch (\Exception $e) {
             Log::error('Email verification failed', [
@@ -233,7 +230,7 @@ class EmailVerificationService
             try {
                 $parts = $this->parseEmail($email);
                 if ($parts) {
-                    $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId);
+                    $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 }
             } catch (\Exception $saveException) {
                 Log::error('Failed to save verification record', [
@@ -246,7 +243,7 @@ class EmailVerificationService
         return $result;
     }
     
-    private function saveVerification(array $result, ?int $userId, ?int $teamId, ?int $tokenId, array $parts, ?int $bulkJobId = null): void
+    private function saveVerification(array $result, ?int $userId, ?int $teamId, ?int $tokenId, array $parts, ?int $bulkJobId = null, ?string $source = null): void
     {
         try {
             $verification = EmailVerification::create([
@@ -254,6 +251,7 @@ class EmailVerificationService
                 'team_id' => $teamId,
                 'api_key_id' => $tokenId, // Store Sanctum token ID for reference
                 'bulk_verification_job_id' => $bulkJobId,
+                'source' => $source,
                 'email' => $result['email'],
                 'account' => $parts['account'] ?? null,
                 'domain' => $parts['domain'] ?? null,
@@ -264,18 +262,20 @@ class EmailVerificationService
                 'verified_at' => now(),
             ]);
             
-            Log::info('Email verification saved', [
-                'id' => $verification->id,
-                'email' => $result['email'],
-                'status' => $result['status'],
-            ]);
+            // Only log in debug mode to reduce log verbosity
+            if (config('app.debug')) {
+                Log::debug('Email verification saved', [
+                    'id' => $verification->id,
+                    'email' => $result['email'],
+                    'status' => $result['status'],
+                ]);
+            }
         } catch (\Exception $e) {
             Log::error('Failed to save email verification', [
                 'email' => $result['email'],
                 'user_id' => $userId,
                 'team_id' => $teamId,
                 'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
             ]);
             // Don't throw - we still want to return the result
         }
@@ -287,7 +287,8 @@ class EmailVerificationService
             return null;
         }
 
-        $parts = explode('@', $email);
+        // Use limit=2 to handle emails with @ in local part (though filter_var should prevent this)
+        $parts = explode('@', $email, 2);
         if (count($parts) !== 2) {
             return null;
         }

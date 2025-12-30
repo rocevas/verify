@@ -6,7 +6,6 @@ use App\Models\BulkVerificationJob;
 use App\Models\EmailVerification;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 
 class DashboardController extends Controller
 {
@@ -92,39 +91,47 @@ class DashboardController extends Controller
         }
 
         // Get bulk jobs with their stats - filter by team_id
+        // Optimize: Get all bulk job IDs first, then get stats in one query
         $bulkJobs = BulkVerificationJob::where('team_id', $teamId)
             ->orderBy('created_at', 'desc')
             ->limit(20)
-            ->get()
-            ->map(function ($bulkJob) {
-                // Get stats for this bulk job
-                $stats = EmailVerification::where('bulk_verification_job_id', $bulkJob->id)
-                    ->selectRaw('
-                        COUNT(*) as total,
-                        SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
-                        SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
-                        SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
-                    ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
-                    ->first();
+            ->get();
 
-                return [
-                    'id' => $bulkJob->id,
-                    'type' => 'bulk',
-                    'filename' => $bulkJob->filename,
-                    'status' => $bulkJob->status,
-                    'total_emails' => $bulkJob->total_emails,
-                    'processed_emails' => $bulkJob->processed_emails ?? 0,
-                    'progress_percentage' => $bulkJob->progress_percentage,
-                    'stats' => [
-                        'valid' => $stats->valid ?? 0,
-                        'invalid' => $stats->invalid ?? 0,
-                        'risky' => $stats->risky ?? 0,
-                        'total' => $stats->total ?? 0,
-                    ],
-                    'created_at' => $bulkJob->created_at?->toIso8601String() ?? $bulkJob->created_at,
-                    'completed_at' => $bulkJob->completed_at?->toIso8601String() ?? $bulkJob->completed_at,
-                ];
-            });
+        // Get all stats in one query to avoid N+1 problem
+        $bulkJobIds = $bulkJobs->pluck('id');
+        $statsQuery = EmailVerification::whereIn('bulk_verification_job_id', $bulkJobIds)
+            ->selectRaw('
+                bulk_verification_job_id,
+                COUNT(*) as total,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
+                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
+            ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
+            ->groupBy('bulk_verification_job_id')
+            ->get()
+            ->keyBy('bulk_verification_job_id');
+
+        $bulkJobs = $bulkJobs->map(function ($bulkJob) use ($statsQuery) {
+            $stats = $statsQuery->get($bulkJob->id);
+
+            return [
+                'id' => $bulkJob->id,
+                'type' => 'bulk',
+                'filename' => $bulkJob->filename,
+                'status' => $bulkJob->status,
+                'total_emails' => $bulkJob->total_emails,
+                'processed_emails' => $bulkJob->processed_emails ?? 0,
+                'progress_percentage' => $bulkJob->progress_percentage,
+                'stats' => [
+                    'valid' => $stats->valid ?? 0,
+                    'invalid' => $stats->invalid ?? 0,
+                    'risky' => $stats->risky ?? 0,
+                    'total' => $stats->total ?? 0,
+                ],
+                'created_at' => $bulkJob->created_at?->toIso8601String() ?? $bulkJob->created_at,
+                'completed_at' => $bulkJob->completed_at?->toIso8601String() ?? $bulkJob->completed_at,
+            ];
+        });
 
         // Get individual verifications (not part of bulk jobs) - filter by team_id
         $individualVerifications = EmailVerification::where('team_id', $teamId)
@@ -144,26 +151,9 @@ class DashboardController extends Controller
                 ];
             });
 
-        // Also include all verifications for backward compatibility - filter by team_id
-        $allVerifications = EmailVerification::where('team_id', $teamId)
-            ->orderBy('created_at', 'desc')
-            ->limit(100)
-            ->get()
-            ->map(function ($verification) {
-                return [
-                    'id' => $verification->id,
-                    'email' => $verification->email,
-                    'status' => $verification->status,
-                    'score' => $verification->score,
-                    'checks' => $verification->checks,
-                    'created_at' => $verification->created_at?->toIso8601String() ?? $verification->created_at,
-                ];
-            });
-
         return response()->json([
             'bulk_jobs' => $bulkJobs,
             'individual_verifications' => $individualVerifications,
-            'all_verifications' => $allVerifications, // For backward compatibility
         ]);
     }
 

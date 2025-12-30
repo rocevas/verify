@@ -26,7 +26,8 @@ class VerifyEmailJob implements ShouldQueue
         public ?int $userId = null,
         public ?int $teamId = null,
         public ?int $tokenId = null,
-        public ?int $bulkJobId = null
+        public ?int $bulkJobId = null,
+        public ?string $source = null
     ) {
     }
 
@@ -36,7 +37,7 @@ class VerifyEmailJob implements ShouldQueue
     public function handle(EmailVerificationService $service): void
     {
         try {
-            $service->verify($this->email, $this->userId, $this->teamId, $this->tokenId, $this->bulkJobId);
+            $service->verify($this->email, $this->userId, $this->teamId, $this->tokenId, $this->bulkJobId, $this->source);
         } catch (SmtpRateLimitExceededException $e) {
             // Rate limit exceeded - will retry with backoff
             Log::info('SMTP rate limit exceeded, job will retry', [
