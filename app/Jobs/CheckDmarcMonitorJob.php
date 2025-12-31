@@ -61,7 +61,6 @@ class CheckDmarcMonitorJob implements ShouldQueue
                     $checkResult->update(['notification_sent' => true]);
                     
                     Log::info("DMARC issue notification sent for monitor {$monitor->id}", [
-                        'monitor' => $monitor->name,
                         'domain' => $monitor->domain,
                         'issue_type' => $result['issue_type'] ?? 'unknown',
                     ]);

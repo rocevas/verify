@@ -33,11 +33,10 @@ class DmarcMonitorNotification extends Notification implements ShouldQueue
             ->subject("⚠️ DMARC problema aptikta domenui {$domain}")
             ->greeting('Sveiki!')
             ->line("Jūsų stebimas DMARC domenui **{$domain}** turi problemų.")
-            ->line("**Monitorius:** {$this->monitor->name}")
             ->line("**Problema:** {$message}")
             ->line("**Tipas:** {$issueType}")
             ->line("Prašome patikrinti ir ištaisyti DMARC konfigūraciją.")
-            ->action('Peržiūrėti monitorių', url('/admin/monitors'))
+            ->action('Peržiūrėti monitorių', url('/admin/dmarc-monitors'))
             ->line('Jei turite klausimų, susisiekite su pagalba.');
     }
 
@@ -45,7 +44,6 @@ class DmarcMonitorNotification extends Notification implements ShouldQueue
     {
         return [
             'monitor_id' => $this->monitor->id,
-            'monitor_name' => $this->monitor->name,
             'domain' => $this->monitor->domain,
             'issue_type' => $this->checkResult['issue_type'] ?? 'unknown',
             'message' => $this->checkResult['message'] ?? 'DMARC issue detected',

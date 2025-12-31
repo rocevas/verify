@@ -13,6 +13,10 @@ Route::get('/', function () {
     ]);
 });
 
+// DMARC report webhook (public endpoint for receiving reports)
+Route::post('/webhooks/dmarc-report', [\App\Http\Controllers\DmarcReportController::class, 'receive'])
+    ->name('webhooks.dmarc-report');
+
 Route::middleware([
     'auth:sanctum',
     config('jetstream.auth_session'),
@@ -44,6 +48,11 @@ Route::middleware([
     Route::get('/monitors/blocklist/{id}', function (int $id) {
         return Inertia::render('BlocklistMonitorDetail', ['monitorId' => $id]);
     })->name('monitors.blocklist.detail');
+    
+    // DMARC Monitor Detail page
+    Route::get('/monitors/dmarc/{id}', function (int $id) {
+        return Inertia::render('DmarcMonitorDetail', ['monitorId' => $id]);
+    })->name('monitors.dmarc.detail');
     
     // Inbox Insight page
     Route::get('/inbox-insight', [\App\Http\Controllers\EmailCampaignController::class, 'index'])->name('inbox-insight');
@@ -105,6 +114,9 @@ Route::middleware([
         
         // Check results
         Route::get('/{type}/{id}/results', [\App\Http\Controllers\Api\MonitorController::class, 'checkResults']);
+        
+        // DMARC monitor detail
+        Route::get('/dmarc/{id}/detail', [\App\Http\Controllers\Api\MonitorController::class, 'dmarcDetail']);
     });
     
     // Blacklist routes

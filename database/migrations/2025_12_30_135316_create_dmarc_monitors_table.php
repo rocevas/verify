@@ -15,7 +15,6 @@ return new class extends Migration
             $table->id();
             $table->foreignId('user_id')->constrained()->onDelete('cascade');
             $table->foreignId('team_id')->nullable()->constrained()->onDelete('cascade');
-            $table->string('name')->comment('Monitor name');
             $table->string('domain')->comment('Domain to monitor for DMARC');
             $table->string('report_email')->nullable()->comment('Email address to receive DMARC reports');
             $table->boolean('active')->default(true)->comment('Whether monitoring is active');
@@ -24,6 +23,7 @@ return new class extends Migration
             $table->boolean('has_issue')->default(false)->comment('Whether DMARC has issues');
             $table->json('last_check_details')->nullable()->comment('Last check details');
             $table->json('dmarc_record')->nullable()->comment('Current DMARC record');
+            $table->text('dmarc_record_string')->nullable();
             $table->timestamps();
             $table->softDeletes();
 

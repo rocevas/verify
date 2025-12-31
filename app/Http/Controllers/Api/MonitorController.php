@@ -111,11 +111,9 @@ class MonitorController extends Controller
     public function dmarcStore(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
-            'name' => 'required|string|max:255',
             'domain' => 'required|string|max:255|regex:/^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$/i',
             'report_email' => 'nullable|email|max:255',
             'active' => 'boolean',
-            'check_interval_minutes' => 'required|integer|min:60|max:10080',
             'team_id' => 'nullable|exists:teams,id',
         ]);
 
@@ -129,12 +127,16 @@ class MonitorController extends Controller
         $monitor = DmarcMonitor::create([
             'user_id' => $user->id,
             'team_id' => $request->input('team_id') ?? $team?->id,
-            'name' => $request->input('name'),
             'domain' => $request->input('domain'),
-            'report_email' => $request->input('report_email'),
+            'report_email' => $request->input('report_email'), // Will be auto-generated if null
             'active' => $request->input('active', true),
-            'check_interval_minutes' => $request->input('check_interval_minutes', 1440),
         ]);
+
+        // Ensure DMARC record is generated
+        if (!$monitor->dmarc_record_string) {
+            $monitor->generateDmarcRecord();
+            $monitor->refresh();
+        }
 
         return response()->json($monitor, 201);
     }
@@ -182,20 +184,25 @@ class MonitorController extends Controller
         $monitor = DmarcMonitor::where('user_id', $request->user()->id)->findOrFail($id);
 
         $validator = Validator::make($request->all(), [
-            'name' => 'sometimes|string|max:255',
             'domain' => 'sometimes|string|max:255|regex:/^([a-z0-9]+(-[a-z0-9]+)*\.)+[a-z]{2,}$/i',
             'report_email' => 'nullable|email|max:255',
             'active' => 'boolean',
-            'check_interval_minutes' => 'sometimes|integer|min:60|max:10080',
         ]);
 
         if ($validator->fails()) {
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
-        $monitor->update($request->only([
-            'name', 'domain', 'report_email', 'active', 'check_interval_minutes'
-        ]));
+        $updateData = $request->only(['domain', 'report_email', 'active']);
+        
+        // If domain or report_email changed, regenerate DMARC record
+        if (isset($updateData['domain']) || isset($updateData['report_email'])) {
+            $monitor->update($updateData);
+            $monitor->generateDmarcRecord();
+            $monitor->refresh();
+        } else {
+            $monitor->update($updateData);
+        }
 
         return response()->json($monitor);
     }
@@ -269,5 +276,75 @@ class MonitorController extends Controller
             ->get();
 
         return response()->json($results);
+    }
+
+    /**
+     * Get DMARC monitor detail with reports
+     */
+    public function dmarcDetail(Request $request, int $id): JsonResponse
+    {
+        $user = $request->user();
+        
+        $monitor = DmarcMonitor::where('user_id', $user->id)
+            ->with(['checkResults' => function ($query) {
+                $query->orderBy('checked_at', 'desc')->limit(100);
+            }])
+            ->findOrFail($id);
+
+        // Calculate statistics from reports
+        $stats = [
+            'total_reports' => $monitor->checkResults->count(),
+            'total_messages' => 0,
+            'passed' => 0,
+            'failed' => 0,
+            'quarantined' => 0,
+            'rejected' => 0,
+            'unique_ips' => 0,
+            'reports_by_date' => [],
+        ];
+
+        $uniqueIPs = [];
+        foreach ($monitor->checkResults as $result) {
+            $details = $result->check_details ?? [];
+            if (isset($details['summary'])) {
+                $summary = $details['summary'];
+                $stats['total_messages'] += $summary['total_messages'] ?? 0;
+                $stats['passed'] += $summary['passed'] ?? 0;
+                $stats['failed'] += $summary['failed'] ?? 0;
+                $stats['quarantined'] += $summary['quarantined'] ?? 0;
+                $stats['rejected'] += $summary['rejected'] ?? 0;
+            }
+
+            // Collect unique IPs
+            if (isset($details['records'])) {
+                foreach ($details['records'] as $record) {
+                    if (isset($record['source_ip'])) {
+                        $uniqueIPs[$record['source_ip']] = true;
+                    }
+                }
+            }
+
+            // Group by date
+            $date = $result->checked_at->format('Y-m-d');
+            if (!isset($stats['reports_by_date'][$date])) {
+                $stats['reports_by_date'][$date] = 0;
+            }
+            $stats['reports_by_date'][$date]++;
+        }
+
+        $stats['unique_ips'] = count($uniqueIPs);
+
+        return response()->json([
+            'monitor' => $monitor,
+            'stats' => $stats,
+            'reports' => $monitor->checkResults->map(function ($result) {
+                return [
+                    'id' => $result->id,
+                    'checked_at' => $result->checked_at,
+                    'has_issue' => $result->has_issue,
+                    'check_details' => $result->check_details,
+                ];
+            }),
+        ]);
     }
 }

@@ -49,12 +49,12 @@ const detectType = (target) => {
 // DMARC monitors
 const dmarcMonitors = ref([]);
 const dmarcForm = ref({
-    name: '',
     domain: '',
-    report_email: '',
     active: true,
-    check_interval_minutes: 1440,
 });
+
+const showDmarcRecordModal = ref(false);
+const selectedDmarcRecord = ref(null);
 
 const loadBlocklistMonitors = async () => {
     try {
@@ -108,22 +108,33 @@ const openDmarcModal = (monitor = null) => {
     editingDmarc.value = monitor;
     if (monitor) {
         dmarcForm.value = {
-            name: monitor.name,
             domain: monitor.domain,
-            report_email: monitor.report_email || '',
             active: monitor.active,
-            check_interval_minutes: monitor.check_interval_minutes,
         };
     } else {
         dmarcForm.value = {
-            name: '',
             domain: '',
-            report_email: '',
             active: true,
-            check_interval_minutes: 1440,
         };
     }
     showDmarcModal.value = true;
+};
+
+const showDmarcRecord = (monitor) => {
+    selectedDmarcRecord.value = monitor;
+    showDmarcRecordModal.value = true;
+};
+
+const copyDmarcRecord = async () => {
+    if (selectedDmarcRecord.value?.dmarc_record_string) {
+        try {
+            await navigator.clipboard.writeText(selectedDmarcRecord.value.dmarc_record_string);
+            alert('DMARC record copied to clipboard!');
+        } catch (error) {
+            console.error('Failed to copy:', error);
+            alert('Failed to copy to clipboard');
+        }
+    }
 };
 
 const saveBlocklistMonitor = async () => {
@@ -166,6 +177,7 @@ const saveBlocklistMonitor = async () => {
 const saveDmarcMonitor = async () => {
     try {
         loading.value = true;
+        // Backend will auto-generate report_email
         if (editingDmarc.value) {
             await window.axios.put(`/api/monitors/dmarc/${editingDmarc.value.id}`, dmarcForm.value, {
                 withCredentials: true,
@@ -385,8 +397,8 @@ onMounted(() => {
                                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                                     <thead class="bg-gray-50 dark:bg-gray-700">
                                         <tr>
-                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Name</th>
                                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Domain</th>
+                                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Report Email</th>
                                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Status</th>
                                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Last Checked</th>
                                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Actions</th>
@@ -395,10 +407,10 @@ onMounted(() => {
                                     <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                                         <tr v-for="monitor in dmarcMonitors" :key="monitor.id">
                                             <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
-                                                {{ monitor.name }}
+                                                {{ monitor.domain }}
                                             </td>
                                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                                                {{ monitor.domain }}
+                                                {{ monitor.report_email || 'Auto-generated' }}
                                             </td>
                                             <td class="px-6 py-4 whitespace-nowrap">
                                                 <span :class="['px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full', getIssueColor(monitor.has_issue)]">
@@ -409,7 +421,9 @@ onMounted(() => {
                                                 {{ monitor.last_checked_at ? new Date(monitor.last_checked_at).toLocaleString() : 'Never' }}
                                             </td>
                                             <td class="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                                                <button @click="router.visit(`/monitors/dmarc/${monitor.id}`)" class="text-indigo-600 hover:text-indigo-900 dark:text-indigo-400">View</button>
                                                 <button @click="checkDmarcMonitor(monitor.id)" class="text-indigo-600 hover:text-indigo-900 dark:text-indigo-400">Check</button>
+                                                <button @click="showDmarcRecord(monitor)" class="text-green-600 hover:text-green-900 dark:text-green-400">DMARC Record</button>
                                                 <button @click="openDmarcModal(monitor)" class="text-blue-600 hover:text-blue-900 dark:text-blue-400">Edit</button>
                                                 <button @click="deleteDmarcMonitor(monitor.id)" class="text-red-600 hover:text-red-900 dark:text-red-400">Delete</button>
                                             </td>
@@ -483,17 +497,6 @@ onMounted(() => {
 
                 <div class="space-y-4">
                     <div>
-                        <InputLabel for="dmarc-name" value="Name" />
-                        <TextInput
-                            id="dmarc-name"
-                            v-model="dmarcForm.name"
-                            type="text"
-                            class="mt-1 block w-full"
-                            required
-                        />
-                    </div>
-
-                    <div>
                         <InputLabel for="dmarc-domain" value="Domain" />
                         <TextInput
                             id="dmarc-domain"
@@ -503,30 +506,9 @@ onMounted(() => {
                             placeholder="example.com"
                             required
                         />
-                    </div>
-
-                    <div>
-                        <InputLabel for="dmarc-email" value="Report Email (optional)" />
-                        <TextInput
-                            id="dmarc-email"
-                            v-model="dmarcForm.report_email"
-                            type="email"
-                            class="mt-1 block w-full"
-                            placeholder="reports@example.com"
-                        />
-                    </div>
-
-                    <div>
-                        <InputLabel for="dmarc-interval" value="Check Interval (minutes)" />
-                        <TextInput
-                            id="dmarc-interval"
-                            v-model.number="dmarcForm.check_interval_minutes"
-                            type="number"
-                            min="60"
-                            max="10080"
-                            class="mt-1 block w-full"
-                            required
-                        />
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                            Enter the domain name to monitor for DMARC. Report email will be auto-generated.
+                        </p>
                     </div>
 
                     <div class="flex items-center">
@@ -551,6 +533,66 @@ onMounted(() => {
                         class="px-4 py-2 bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-400 dark:hover:bg-gray-600"
                     >
                         Cancel
+                    </button>
+                </div>
+            </div>
+        </Modal>
+
+        <!-- DMARC Record Modal -->
+        <Modal :show="showDmarcRecordModal" @close="showDmarcRecordModal = false">
+            <div class="p-6">
+                <h2 class="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">
+                    DMARC Record for {{ selectedDmarcRecord?.domain }}
+                </h2>
+
+                <div v-if="selectedDmarcRecord" class="space-y-4">
+                    <div>
+                        <div class="flex justify-between items-center mb-1">
+                            <InputLabel value="DMARC Record" />
+                            <button
+                                v-if="selectedDmarcRecord.dmarc_record_string"
+                                @click="copyDmarcRecord"
+                                class="text-sm text-indigo-600 hover:text-indigo-900 dark:text-indigo-400"
+                            >
+                                Copy
+                            </button>
+                        </div>
+                        <div class="mt-1 p-3 bg-gray-50 dark:bg-gray-900 rounded border border-gray-300 dark:border-gray-700">
+                            <code class="text-sm break-all text-gray-900 dark:text-gray-100">
+                                {{ selectedDmarcRecord.dmarc_record_string || 'DMARC record will be generated after saving' }}
+                            </code>
+                        </div>
+                        <p class="mt-2 text-sm text-gray-600 dark:text-gray-400">
+                            Copy this DMARC record to your DNS. Add it as a TXT record for <strong>_dmarc.{{ selectedDmarcRecord.domain }}</strong>
+                        </p>
+                    </div>
+
+                    <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded p-4">
+                        <h3 class="text-sm font-medium text-blue-900 dark:text-blue-200 mb-2">DNS Configuration:</h3>
+                        <div class="text-sm text-blue-800 dark:text-blue-300 space-y-1">
+                            <p><strong>Type:</strong> TXT</p>
+                            <p><strong>Name:</strong> _dmarc.{{ selectedDmarcRecord.domain }}</p>
+                            <p><strong>Value:</strong> {{ selectedDmarcRecord.dmarc_record_string || 'Not generated yet' }}</p>
+                        </div>
+                    </div>
+
+                    <div v-if="selectedDmarcRecord.report_email">
+                        <InputLabel value="Report Email" />
+                        <p class="mt-1 text-sm text-gray-600 dark:text-gray-400">
+                            {{ selectedDmarcRecord.report_email }}
+                        </p>
+                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-500">
+                            DMARC reports will be sent to this email address.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="mt-6 flex justify-end">
+                    <button
+                        @click="showDmarcRecordModal = false"
+                        class="px-4 py-2 bg-gray-300 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-md hover:bg-gray-400 dark:hover:bg-gray-600"
+                    >
+                        Close
                     </button>
                 </div>
             </div>

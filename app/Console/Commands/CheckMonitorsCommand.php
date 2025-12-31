@@ -42,11 +42,12 @@ class CheckMonitorsCommand extends Command
             }
         }
 
-        // Check DMARC monitors
+        // Check DMARC monitors - check all active monitors systematically
+        // Check monitors that haven't been checked in the last 24 hours
         $dmarcMonitors = DmarcMonitor::where('active', true)
             ->where(function ($query) {
                 $query->whereNull('last_checked_at')
-                    ->orWhereRaw('last_checked_at + INTERVAL check_interval_minutes MINUTE <= NOW()');
+                    ->orWhereRaw('last_checked_at <= NOW() - INTERVAL 24 HOUR');
             })
             ->get();
 
@@ -55,7 +56,7 @@ class CheckMonitorsCommand extends Command
             try {
                 CheckDmarcMonitorJob::dispatch($monitor->id);
                 $dmarcCount++;
-                $this->line("Queued DMARC check for: {$monitor->name} ({$monitor->domain})");
+                $this->line("Queued DMARC check for: {$monitor->domain}");
             } catch (\Exception $e) {
                 $this->error("Failed to queue DMARC monitor {$monitor->id}: {$e->getMessage()}");
                 Log::error("Failed to queue DMARC monitor check", [
