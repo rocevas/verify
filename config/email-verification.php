@@ -316,6 +316,9 @@ return [
         'isp_esp_status' => 'do_not_mail',
         'government_tld_status' => 'risky',
         'enable_typo_check' => env('EMAIL_VERIFICATION_ENABLE_TYPO_CHECK', true),
+        'enable_automatic_typo_detection' => env('EMAIL_VERIFICATION_AUTO_TYPO_DETECTION', true),
+        'typo_detection_max_distance' => env('EMAIL_VERIFICATION_TYPO_MAX_DISTANCE', 2), // Max Levenshtein distance
+        'typo_detection_min_similarity' => env('EMAIL_VERIFICATION_TYPO_MIN_SIMILARITY', 0.85), // 85% similarity threshold
         'enable_isp_esp_check' => env('EMAIL_VERIFICATION_ENABLE_ISP_ESP_CHECK', true),
         'enable_government_check' => env('EMAIL_VERIFICATION_ENABLE_GOVERNMENT_CHECK', true),
     ],
@@ -852,6 +855,26 @@ return [
 
     'enable_catch_all_detection' => env('EMAIL_VERIFICATION_CATCH_ALL', false),
     'catch_all_status' => 'catch_all',
+
+    /*
+    |--------------------------------------------------------------------------
+    | Domain Validity Check
+    |--------------------------------------------------------------------------
+    |
+    | Check domain validity before MX check:
+    | - DNS resolution (A record)
+    | - Redirect detection (HTTP redirect)
+    | - Domain availability (HTTP response)
+    |
+    | This helps identify problematic domains early and skip unnecessary checks.
+    |
+    */
+
+    'enable_domain_validity_check' => env('EMAIL_VERIFICATION_DOMAIN_VALIDITY_CHECK', true),
+    'check_domain_redirect' => env('EMAIL_VERIFICATION_CHECK_REDIRECT', false), // Disabled by default (adds HTTP overhead)
+    'check_domain_availability' => env('EMAIL_VERIFICATION_CHECK_AVAILABILITY', false), // Disabled by default (adds HTTP overhead)
+    'domain_check_timeout' => env('EMAIL_VERIFICATION_DOMAIN_CHECK_TIMEOUT', 3), // seconds
+    'domain_validity_cache_ttl' => env('EMAIL_VERIFICATION_DOMAIN_VALIDITY_CACHE_TTL', 3600), // 1 hour
 
     /*
     |--------------------------------------------------------------------------
