@@ -26,6 +26,7 @@ services:
             - redis
             - mailpit
             - spamassassin
+            - ollama
     pgsql:
         image: 'postgres:18-alpine'
         ports:
@@ -92,6 +93,24 @@ services:
             timeout: 10s
             retries: 5
             start_period: 120s
+    ollama:
+        image: 'ollama/ollama:latest'
+        ports:
+            - '${FORWARD_OLLAMA_PORT:-11434}:11434'
+        volumes:
+            - 'sail-ollama:/root/.ollama'
+            - './docker/ollama/init.sh:/init.sh:ro'
+        networks:
+            - sail
+        environment:
+            - OLLAMA_HOST=0.0.0.0:11434
+        healthcheck:
+            test: ["CMD-SHELL", "wget -q --spider http://localhost:11434/api/tags || exit 1"]
+            interval: 30s
+            timeout: 10s
+            retries: 5
+            start_period: 180s
+        entrypoint: ["/bin/sh", "/init.sh"]
 networks:
     sail:
         driver: bridge
@@ -105,4 +124,6 @@ volumes:
     sail-spamassassin-config:
         driver: local
     sail-spamassassin-data:
+        driver: local
+    sail-ollama:
         driver: local
