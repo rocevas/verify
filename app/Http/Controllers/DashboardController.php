@@ -214,12 +214,15 @@ class DashboardController extends Controller
             ->orderBy('created_at', 'desc')
             ->get()
             ->map(function ($verification) {
+                $checks = $verification->checks ?? [];
                 return [
                     'id' => $verification->id,
                     'email' => $verification->email,
                     'status' => $verification->status,
                     'score' => $verification->score,
-                    'checks' => $verification->checks,
+                    'checks' => $checks,
+                    'ai_confidence' => $checks['ai_confidence'] ?? null,
+                    'ai_insights' => $checks['ai_insights'] ?? null,
                     'created_at' => $verification->created_at,
                 ];
             });
@@ -303,12 +306,15 @@ class DashboardController extends Controller
             ->paginate($perPage, ['*'], 'page', $page);
 
         $data = $emails->map(function ($verification) {
+            $checks = $verification->checks ?? [];
             return [
                 'id' => $verification->id,
                 'email' => $verification->email,
                 'status' => $verification->status,
                 'score' => $verification->score,
-                'checks' => $verification->checks,
+                'checks' => $checks,
+                'ai_confidence' => $checks['ai_confidence'] ?? null,
+                'ai_insights' => $checks['ai_insights'] ?? null,
                 'error' => $verification->error,
                 'created_at' => $verification->created_at?->toIso8601String(),
             ];

@@ -26,6 +26,7 @@ const emailsPagination = ref({
     per_page: 50,
     total: 0
 });
+const expandedRows = ref(new Set());
 
 const loadBulkJob = async () => {
     loading.value = true;
@@ -72,6 +73,14 @@ const getStatusColor = (status) => {
 
 const getStatusBadge = (status) => {
     return status.charAt(0).toUpperCase() + status.slice(1).replace('_', ' ');
+};
+
+const toggleRow = (emailId) => {
+    if (expandedRows.value.has(emailId)) {
+        expandedRows.value.delete(emailId);
+    } else {
+        expandedRows.value.add(emailId);
+    }
 };
 
 let refreshInterval = null;
@@ -268,26 +277,78 @@ onUnmounted(() => {
                                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Email</th>
                                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Status</th>
                                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Score</th>
+                                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">AI Confidence</th>
+                                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">AI Insights</th>
                                                     <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Date</th>
                                                 </tr>
                                             </thead>
                                             <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                                                <tr v-for="email in emailsData" :key="email.id">
-                                                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
-                                                        {{ email.email }}
-                                                    </td>
-                                                    <td class="px-6 py-4 whitespace-nowrap">
-                                                        <span :class="['px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full', getStatusColor(email.status)]">
-                                                            {{ getStatusBadge(email.status) }}
-                                                        </span>
-                                                    </td>
-                                                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                                                        {{ email.score ?? '-' }}
-                                                    </td>
-                                                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                                                        {{ new Date(email.created_at).toLocaleString() }}
-                                                    </td>
-                                                </tr>
+                                                <template v-for="email in emailsData" :key="email.id">
+                                                    <tr class="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                                                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
+                                                            {{ email.email }}
+                                                        </td>
+                                                        <td class="px-6 py-4 whitespace-nowrap">
+                                                            <span :class="['px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full', getStatusColor(email.status)]">
+                                                                {{ getStatusBadge(email.status) }}
+                                                            </span>
+                                                        </td>
+                                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                                                            {{ email.score ?? '-' }}
+                                                        </td>
+                                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                                                            <span v-if="email.ai_confidence !== null" class="flex items-center gap-1">
+                                                                <span class="text-purple-600 dark:text-purple-400">🤖</span>
+                                                                <span class="font-semibold">{{ email.ai_confidence }}%</span>
+                                                            </span>
+                                                            <span v-else class="text-gray-400">-</span>
+                                                        </td>
+                                                        <td class="px-6 py-4 text-sm text-gray-500 dark:text-gray-400">
+                                                            <div v-if="email.ai_insights" class="max-w-md">
+                                                                <div 
+                                                                    v-if="!expandedRows.has(email.id)"
+                                                                    class="truncate cursor-pointer hover:text-purple-600 dark:hover:text-purple-400"
+                                                                    @click="toggleRow(email.id)"
+                                                                    :title="email.ai_insights"
+                                                                >
+                                                                    {{ email.ai_insights }}
+                                                                </div>
+                                                                <div 
+                                                                    v-else
+                                                                    class="cursor-pointer hover:text-purple-600 dark:hover:text-purple-400"
+                                                                    @click="toggleRow(email.id)"
+                                                                >
+                                                                    {{ email.ai_insights }}
+                                                                </div>
+                                                            </div>
+                                                            <span v-else class="text-gray-400">-</span>
+                                                        </td>
+                                                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                                                            {{ new Date(email.created_at).toLocaleString() }}
+                                                        </td>
+                                                    </tr>
+                                                    <!-- Expanded row with full AI insights -->
+                                                    <tr v-if="expandedRows.has(email.id) && email.ai_insights" class="bg-purple-50 dark:bg-purple-900/20">
+                                                        <td colspan="6" class="px-6 py-4">
+                                                            <div class="flex items-start gap-2">
+                                                                <span class="text-purple-600 dark:text-purple-400 text-lg">🤖</span>
+                                                                <div class="flex-1">
+                                                                    <div class="text-xs font-semibold text-purple-700 dark:text-purple-300 mb-1">AI Analysis:</div>
+                                                                    <div class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">{{ email.ai_insights }}</div>
+                                                                </div>
+                                                                <button 
+                                                                    @click="toggleRow(email.id)"
+                                                                    class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+                                                                    title="Collapse"
+                                                                >
+                                                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path>
+                                                                    </svg>
+                                                                </button>
+                                                            </div>
+                                                        </td>
+                                                    </tr>
+                                                </template>
                                             </tbody>
                                         </table>
                                     </div>

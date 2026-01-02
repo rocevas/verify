@@ -41,4 +41,18 @@ return [
         'threshold' => env('SPAMASSASSIN_THRESHOLD', 5.0),
     ],
 
+    'openai' => [
+        'key' => env('OPENAI_API_KEY'),
+        'model' => env('OPENAI_MODEL', 'gpt-4o-mini'),
+        'base_url' => env('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
+        'enabled' => env('OPENAI_ENABLED', true),
+    ],
+
+    'ai' => [
+        'provider' => env('AI_PROVIDER', 'ollama'), // 'ollama' or 'openai'
+        'model' => env('AI_MODEL', 'llama3.2:1b'), // For Ollama: llama3.2:1b (1B params, low resources), llama3.2, mistral, etc.
+        'base_url' => env('AI_BASE_URL', env('APP_ENV') === 'local' && env('LARAVEL_SAIL') ? 'http://ollama:11434' : 'http://localhost:11434'), // Docker: ollama, Local: localhost
+        'enabled' => env('AI_ENABLED', true),
+    ],
+
 ];
