@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Exceptions\SmtpRateLimitExceededException;
 use App\Models\EmailVerification;
+use App\Models\MxSkipList;
 use Illuminate\Support\Facades\Log;
 use Propaganistas\LaravelDisposableEmail\DisposableDomains;
 use Illuminate\Support\Facades\Cache;
@@ -189,6 +190,228 @@ class EmailVerificationService
         return in_array($tld, $governmentTlds, true);
     }
 
+    /**
+     * Check if MX server should be skipped
+     */
+    private function shouldSkipMxServer(string $mxHost): bool
+    {
+        $skipList = config('email-verification.mx_skip_list', []);
+        $mxHostLower = strtolower($mxHost);
+        
+        // Check exact match in config (manual entries)
+        if (in_array($mxHostLower, $skipList, true)) {
+            return true;
+        }
+        
+        // Check subdomain match (e.g., mail.securence.com -> securence.com)
+        foreach ($skipList as $skipDomain) {
+            if (str_ends_with($mxHostLower, '.' . $skipDomain) || $mxHostLower === $skipDomain) {
+                return true;
+            }
+        }
+        
+        // Check database for auto-added servers (with caching for performance)
+        $cacheKey = "mx_skip_db_{$mxHostLower}";
+        return Cache::remember($cacheKey, 3600, function () use ($mxHostLower) {
+            return MxSkipList::isSkipped($mxHostLower);
+        });
+    }
+
+    /**
+     * Add MX server to skip list (auto-add feature)
+     */
+    private function addMxToSkipList(string $mxHost, string $reason = 'SMTP connection failed', ?string $response = null): void
+    {
+        if (!config('email-verification.mx_skip_auto_add', true)) {
+            return;
+        }
+        
+        try {
+            $expiresInDays = config('email-verification.mx_skip_auto_add_expires_days', 30);
+            
+            // Store in database (persistent)
+            MxSkipList::addOrUpdate(
+                $mxHost,
+                $reason,
+                $response,
+                false, // is_manual = false (auto-added)
+                $expiresInDays
+            );
+            
+            // Clear cache to force refresh
+            $mxHostLower = strtolower($mxHost);
+            Cache::forget("mx_skip_db_{$mxHostLower}");
+            
+            Log::info('MX server added to skip list', [
+                'mx_host' => $mxHost,
+                'reason' => $reason,
+                'expires_in_days' => $expiresInDays,
+            ]);
+        } catch (\Exception $e) {
+            Log::warning('Failed to add MX server to skip list', [
+                'mx_host' => $mxHost,
+                'reason' => $reason,
+                'error' => $e->getMessage(),
+            ]);
+        }
+    }
+
+    /**
+     * Check if domain is unsupported for SMTP verification
+     */
+    private function checkUnsupportedDomain(string $domain): bool
+    {
+        $unsupported = config('email-verification.unsupported_domains', []);
+        $domainLower = strtolower($domain);
+        
+        // Exact match
+        if (in_array($domainLower, $unsupported, true)) {
+            return true;
+        }
+        
+        // Subdomain check
+        foreach ($unsupported as $unsupportedDomain) {
+            if (str_ends_with($domainLower, '.' . $unsupportedDomain) || $domainLower === $unsupportedDomain) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+
+    /**
+     * Check if catch-all check should be skipped for domain
+     */
+    private function shouldSkipCatchAllCheck(string $domain): bool
+    {
+        $skipDomains = config('email-verification.catch_all_skip_domains', []);
+        $domainLower = strtolower($domain);
+        
+        return in_array($domainLower, $skipDomains, true);
+    }
+
+    /**
+     * Generate random email address for catch-all testing
+     */
+    private function generateRandomEmail(string $domain): string
+    {
+        $characters = '0123456789abcdefghijklmnopqrstuvwxyz';
+        $randomString = '';
+        $length = 10;
+        
+        for ($i = 0; $i < $length; $i++) {
+            $randomString .= $characters[rand(0, strlen($characters) - 1)];
+        }
+        
+        return strtolower($randomString) . '@' . $domain;
+    }
+
+    /**
+     * Check if domain is a catch-all server
+     * Tests by sending a random email address to the domain's MX server
+     */
+    private function isCatchAllServer(string $domain): bool
+    {
+        if (!config('email-verification.enable_catch_all_detection', false)) {
+            return false;
+        }
+        
+        // Skip if domain is in catch-all skip list
+        if ($this->shouldSkipCatchAllCheck($domain)) {
+            return false;
+        }
+        
+        // Skip if domain is a public provider (they are always catch-all)
+        $mxRecords = $this->getMxRecords($domain);
+        $publicProvider = $this->isPublicProvider($domain, $mxRecords);
+        if ($publicProvider) {
+            return false; // Public providers are catch-all, but we skip detection
+        }
+        
+        // Generate random email
+        $randomEmail = $this->generateRandomEmail($domain);
+        
+        // Check if random email is accepted (if yes, it's catch-all)
+        return $this->checkSmtp($randomEmail, $domain);
+    }
+
+    /**
+     * Check if domain is a public email provider
+     */
+    private function isPublicProvider(string $domain, array $mxRecords): ?array
+    {
+        $providers = config('email-verification.public_providers', []);
+        $domainLower = strtolower($domain);
+        
+        foreach ($providers as $providerName => $providerConfig) {
+            // Check domain match
+            $providerDomains = $providerConfig['domains'] ?? [];
+            if (in_array($domainLower, $providerDomains, true)) {
+                return $providerConfig;
+            }
+            
+            // Check MX patterns
+            $mxPatterns = $providerConfig['mx_patterns'] ?? [];
+            foreach ($mxRecords as $mx) {
+                $mxHost = strtolower($mx['host'] ?? '');
+                foreach ($mxPatterns as $pattern) {
+                    if (str_contains($mxHost, strtolower($pattern))) {
+                        return $providerConfig;
+                    }
+                }
+            }
+        }
+        
+        return null;
+    }
+
+    /**
+     * Get MX records for domain (with caching)
+     */
+    private function getMxRecords(string $domain): array
+    {
+        $cacheKey = "mx_records_{$domain}";
+        $ttl = $this->getMxCacheTtl();
+        
+        return Cache::remember($cacheKey, $ttl, function () use ($domain) {
+            $mxHosts = [];
+            $mxWeights = [];
+            
+            if (!getmxrr($domain, $mxHosts, $mxWeights)) {
+                // Try DNS record method
+                if (function_exists('dns_get_record')) {
+                    $dnsRecords = dns_get_record($domain, DNS_MX);
+                    if (empty($dnsRecords)) {
+                        return [];
+                    }
+                    
+                    foreach ($dnsRecords as $record) {
+                        $mxHosts[] = $record['target'];
+                        $mxWeights[] = $record['pri'];
+                    }
+                } else {
+                    return [];
+                }
+            }
+            
+            // Combine and sort by priority
+            $mxRecords = [];
+            foreach ($mxHosts as $index => $host) {
+                $mxRecords[] = [
+                    'host' => $host,
+                    'pri' => $mxWeights[$index] ?? 10,
+                ];
+            }
+            
+            // Sort by priority (lower priority number = higher priority)
+            usort($mxRecords, function ($a, $b) {
+                return $a['pri'] <=> $b['pri'];
+            });
+            
+            return $mxRecords;
+        });
+    }
+
     private function checkSmtpRateLimit(string $domain): bool
     {
         $rateLimit = $this->getSmtpRateLimit();
@@ -360,6 +583,15 @@ class EmailVerificationService
                 return $result;
             }
 
+            // 3.5. Unsupported domain check
+            if ($this->checkUnsupportedDomain($parts['domain'])) {
+                $result['status'] = config('email-verification.unsupported_domain_status', 'skipped');
+                $result['score'] = 0;
+                $result['error'] = 'Domain does not support SMTP verification';
+                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                return $result;
+            }
+
             // 3. Role-based email check
             $result['checks']['role'] = $this->checkRoleBased($parts['account']);
             if ($result['checks']['role']) {
@@ -374,6 +606,23 @@ class EmailVerificationService
                 $result['score'] = $this->calculateScore($result['checks']);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
+            }
+
+            // 4.5. Public provider check (before SMTP check)
+            $mxRecords = $this->getMxRecords($parts['domain']);
+            $publicProvider = $this->isPublicProvider($parts['domain'], $mxRecords);
+            
+            if ($publicProvider && ($publicProvider['skip_smtp'] ?? false)) {
+                // Skip SMTP check for public providers, but mark as valid if MX records exist
+                if ($result['checks']['mx']) {
+                    $result['status'] = $publicProvider['status'] ?? 'valid';
+                    $result['checks']['smtp'] = false; // Not checked, but valid (public providers block SMTP checks)
+                    // For public providers, give full score since they're known valid providers
+                    $result['score'] = 100; // Public providers are always valid if MX records exist
+                    $result['error'] = null; // Clear any errors
+                    $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                    return $result;
+                }
             }
 
             // Calculate score before SMTP check (for faster response if SMTP fails)
@@ -407,6 +656,25 @@ class EmailVerificationService
                 }
             } else {
                 $result['checks']['smtp'] = false; // Not checked
+            }
+
+            // Catch-all detection (if enabled and SMTP check didn't pass)
+            if (!$result['checks']['smtp'] && config('email-verification.enable_catch_all_detection', false)) {
+                try {
+                    if ($this->isCatchAllServer($parts['domain'])) {
+                        $result['status'] = config('email-verification.catch_all_status', 'catch_all');
+                        $result['score'] = max($result['score'], 50); // Minimum score for catch-all
+                        $result['error'] = 'Catch-all server detected';
+                        $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                        return $result;
+                    }
+                } catch (\Exception $e) {
+                    Log::warning('Catch-all detection failed', [
+                        'email' => $email,
+                        'domain' => $parts['domain'],
+                        'error' => $e->getMessage(),
+                    ]);
+                }
             }
 
             // Determine final status based on config rules
@@ -546,50 +814,51 @@ class EmailVerificationService
 
     private function checkSmtp(string $email, string $domain): bool
     {
-        $mxHosts = [];
-        $mxWeights = [];
+        // Get MX records (with caching)
+        $mxRecords = $this->getMxRecords($domain);
         
-        if (!getmxrr($domain, $mxHosts, $mxWeights)) {
-            // Try DNS record method
-            if (function_exists('dns_get_record')) {
-                $dnsRecords = dns_get_record($domain, DNS_MX);
-                if (empty($dnsRecords)) {
-                    return false;
-                }
-                
-                foreach ($dnsRecords as $record) {
-                    $mxHosts[] = $record['target'];
-                    $mxWeights[] = $record['pri'];
-                }
-            } else {
-                return false;
+        if (empty($mxRecords)) {
+            return false;
+        }
+
+        // Filter out skipped MX servers
+        $mxRecordsToTry = [];
+        foreach ($mxRecords as $mx) {
+            $host = $mx['host'];
+            
+            // Skip if MX server is in skip list
+            if ($this->shouldSkipMxServer($host)) {
+                Log::debug('Skipping MX server (in skip list)', ['host' => $host]);
+                continue;
             }
+            
+            $mxRecordsToTry[] = $mx;
         }
-
-        // Combine and sort by priority
-        $mxRecords = [];
-        foreach ($mxHosts as $index => $host) {
-            $mxRecords[] = [
-                'host' => $host,
-                'pri' => $mxWeights[$index] ?? 10,
-            ];
+        
+        if (empty($mxRecordsToTry)) {
+            Log::info('All MX servers are in skip list', ['domain' => $domain]);
+            return false;
         }
-
-        usort($mxRecords, function ($a, $b) {
-            return $a['pri'] <=> $b['pri'];
-        });
 
         // Try MX records in priority order, but limit to first 3 to avoid long delays
         $maxMxToTry = 3;
-        $mxRecordsToTry = array_slice($mxRecords, 0, $maxMxToTry);
+        $mxRecordsToTry = array_slice($mxRecordsToTry, 0, $maxMxToTry);
         
         foreach ($mxRecordsToTry as $mx) {
             $host = $mx['host'];
             $retries = $this->getSmtpRetries();
             
             for ($attempt = 0; $attempt < $retries; $attempt++) {
-                if ($this->performSmtpCheck($host, $email)) {
+                $result = $this->performSmtpCheck($host, $email);
+                
+                if ($result) {
                     return true;
+                }
+                
+                // If connection failed, add to skip list (if auto-add enabled)
+                if ($attempt === $retries - 1) {
+                    // Last attempt failed, add to skip list
+                    $this->addMxToSkipList($host, 'SMTP connection failed');
                 }
                 
                 // Skip retry delay on last attempt to save time
@@ -602,6 +871,26 @@ class EmailVerificationService
         return false;
     }
 
+    /**
+     * Analyze SMTP response code and message
+     */
+    private function analyzeSmtpResponse(string $response): array
+    {
+        $code = (int)substr($response, 0, 3);
+        $message = trim(substr($response, 4));
+        
+        return [
+            'code' => $code,
+            'message' => $message,
+            'is_greylisting' => in_array($code, [450, 451, 452], true), // Temporary failures
+            'is_catch_all' => in_array($code, [251, 252], true), // Catch-all indicators
+            'is_valid' => in_array($code, [250, 251, 252], true), // Valid responses
+            'is_invalid' => in_array($code, [550, 551, 552, 553, 554], true), // Permanent failures
+            'is_temporary' => $code >= 400 && $code < 500, // 4xx = temporary
+            'is_permanent' => $code >= 500 && $code < 600, // 5xx = permanent
+        ];
+    }
+
     private function performSmtpCheck(string $host, string $email): bool
     {
         $timeout = $this->getSmtpTimeout();
@@ -612,6 +901,8 @@ class EmailVerificationService
         $socket = @fsockopen($host, 25, $errno, $errstr, $connectionTimeout);
         
         if (!$socket) {
+            // Connection failed, add to skip list if auto-add enabled
+            $this->addMxToSkipList($host, 'SMTP connection failed');
             return false;
         }
 
@@ -664,21 +955,61 @@ class EmailVerificationService
             @fwrite($socket, "RCPT TO: <{$email}>\r\n");
             $response = @fgets($socket, 515);
             
+            if (!$response || $isTimeout()) {
+                @fwrite($socket, "QUIT\r\n");
+                @fclose($socket);
+                return false;
+            }
+            
+            // Analyze SMTP response
+            $responseAnalysis = $this->analyzeSmtpResponse($response);
+            
+            // Check for greylisting (4xx responses) - retry after delay
+            if ($responseAnalysis['is_greylisting'] && config('email-verification.enable_greylisting_retry', false)) {
+                $retryDelay = config('email-verification.greylisting_retry_delay', 5);
+                sleep($retryDelay);
+                
+                // Retry RCPT TO
+                @fwrite($socket, "RCPT TO: <{$email}>\r\n");
+                $retryResponse = @fgets($socket, 515);
+                
+                if ($retryResponse && !$isTimeout()) {
+                    $responseAnalysis = $this->analyzeSmtpResponse($retryResponse);
+                    $response = $retryResponse; // Update response for final check
+                }
+            }
+            
+            // Check for error patterns before closing connection
+            if (!$responseAnalysis['is_valid'] && !$responseAnalysis['is_greylisting']) {
+                $errorPatterns = config('email-verification.smtp_error_patterns', []);
+                $responseLower = strtolower($response);
+                
+                foreach ($errorPatterns as $pattern) {
+                    if (str_contains($responseLower, strtolower($pattern))) {
+                        // Add MX to skip list
+                        $this->addMxToSkipList($host, "SMTP error: {$pattern}", trim($response));
+                        
+                        Log::warning('SMTP error pattern detected', [
+                            'host' => $host,
+                            'email' => $email,
+                            'pattern' => $pattern,
+                            'response' => trim($response),
+                            'code' => $responseAnalysis['code'],
+                        ]);
+                        
+                        @fwrite($socket, "QUIT\r\n");
+                        @fclose($socket);
+                        return false;
+                    }
+                }
+            }
+            
             // QUIT
             @fwrite($socket, "QUIT\r\n");
             @fclose($socket);
 
-            // Check RCPT TO response
-            if ($response && str_starts_with($response, '250')) {
-                return true;
-            }
-
-            // Some servers return 251/252 for catch-all
-            if ($response && (str_starts_with($response, '251') || str_starts_with($response, '252'))) {
-                return true;
-            }
-
-            return false;
+            // Check RCPT TO response - valid responses
+            return $responseAnalysis['is_valid'];
 
         } catch (\Exception $e) {
             @fclose($socket);

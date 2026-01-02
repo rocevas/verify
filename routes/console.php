@@ -12,3 +12,6 @@ Schedule::command('disposable:update')->daily();
 
 // Check monitors every 5 minutes
 Schedule::command('monitors:check')->everyFiveMinutes();
+
+// Clean up expired MX skip list entries daily
+Schedule::command('email:cleanup-mx-skip-list')->daily();

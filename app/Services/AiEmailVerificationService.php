@@ -55,7 +55,7 @@ class AiEmailVerificationService
         ?int $tokenId = null,
         ?int $bulkJobId = null,
         ?string $source = null,
-        callable $streamCallback = null
+        ?callable $streamCallback = null
     ): array {
         $result = [
             'email' => $email,
@@ -429,41 +429,86 @@ class AiEmailVerificationService
         $parts = explode('@', $email, 2);
         $localPart = $parts[0] ?? '';
         $domain = $parts[1] ?? '';
+        
+        // Check if email contains '+' character
+        $hasPlus = str_contains($localPart, '+');
+        
+        // Determine if domain is a public provider
+        $publicProviders = ['gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'mail.ru', 'yandex.com', 'aol.com', 'icloud.com'];
+        $isPublicProvider = in_array(strtolower($domain), $publicProviders, true);
+        
+        // Check if domain is a typo domain (common misspellings of public providers)
+        $typoDomains = config('email-verification.typo_domains', []);
+        $isTypoDomain = in_array(strtolower($domain), $typoDomains, true);
+
+        $smtpStatus = $traditionalResult['checks']['smtp'] 
+            ? 'PASS' 
+            : ($traditionalResult['status'] === 'valid' && $traditionalResult['score'] >= 90 
+                ? 'SKIPPED (public provider - known valid)' 
+                : 'FAIL');
+
+        // Build context notes only for relevant cases
+        $contextNotes = [];
+        if ($isPublicProvider) {
+            $contextNotes[] = "This domain ({$domain}) is a PUBLIC EMAIL PROVIDER. These providers are KNOWN VALID and have high deliverability. They often BLOCK SMTP verification attempts for security, but this does NOT mean the email is invalid. If MX records are FOUND, confidence should be 90-100%.";
+        }
+        if ($isTypoDomain) {
+            $contextNotes[] = "⚠️ CRITICAL: This domain ({$domain}) is a TYPO DOMAIN (common misspelling of a public email provider like gmail.com, yahoo.com, etc.). Typo domains are often purchased by spammers or ESPs as spam traps. Even if MX records exist, this should be marked as SPAMTRAP or INVALID with LOW confidence (0-20%). Do NOT trust MX records for typo domains - they are likely spam traps.";
+        }
+        // Only mention '+' if it's actually in the email
+        if ($hasPlus) {
+            $contextNotes[] = "This email contains a '+' character in the local part, which is VALID according to RFC 5322 and commonly used for email aliasing. This is NOT a problem.";
+        }
+        
+        $contextSection = !empty($contextNotes) 
+            ? "\n\nIMPORTANT CONTEXT:\n" . implode("\n", array_map(fn($note) => "- " . $note, $contextNotes))
+            : '';
+
+        // Build strict instructions - completely remove '+' references if not present
+        $plusInstruction = $hasPlus 
+            ? "If you mention the '+' character, note it's valid for aliasing."
+            : "ABSOLUTE PROHIBITION: The '+' character is NOT in this email. DO NOT mention it, discuss it, reference it, or write ANY phrases containing '+', 'plus character', 'aliasing', or 'RFC 5322' in relation to '+'. Common forbidden phrases: 'it's worth noting that the + character', 'the + character is allowed', 'however, the + character', 'the + character in the local part'. Write as if '+' does not exist in email addresses.";
 
         return "Analyze this email address: {$email}
 
 Email structure:
 - Local part (before @): {$localPart}
-- Domain (after @): {$domain}
-
-IMPORTANT: The '+' character in the local part (before @) is VALID according to RFC 5322. It's commonly used for email aliasing (e.g., user+tag@example.com). The '+' character is NOT allowed in the domain part (after @).
+- Domain (after @): {$domain}{$contextSection}
 
 Traditional verification results:
 - Syntax check: " . ($traditionalResult['checks']['syntax'] ? 'PASS (email format is valid)' : 'FAIL (email format is invalid)') . "
 - MX records: " . ($traditionalResult['checks']['mx'] ? 'FOUND' : 'NOT FOUND') . "
-- SMTP check: " . ($traditionalResult['checks']['smtp'] ? 'PASS' : 'FAIL') . "
+- SMTP check: {$smtpStatus}
 - Disposable email: " . ($traditionalResult['checks']['disposable'] ? 'YES' : 'NO') . "
 - Role-based email: " . ($traditionalResult['checks']['role'] ? 'YES' : 'NO') . "
 - Current status: {$traditionalResult['status']}
 - Current score: {$traditionalResult['score']}/100
 
 Analysis guidelines:
-- If syntax check PASSED, the email format is valid (including '+' in local part)
-- Low confidence should be due to deliverability issues (no MX records, domain doesn't exist), NOT due to valid characters in local part
-- Focus on actual deliverability risks: missing MX records, disposable domains, role-based addresses, etc.
+" . ($isPublicProvider ? "- This is a PUBLIC PROVIDER email. If MX records are FOUND, confidence should be 90-100% (these are known valid providers).\n" : '') . "
+" . ($isTypoDomain ? "⚠️ CRITICAL: This is a TYPO DOMAIN. Even if MX records exist, this is likely a SPAM TRAP. Mark as SPAMTRAP or INVALID with LOW confidence (0-20%). Do NOT trust MX records for typo domains.\n" : '') . "
+- If syntax check PASSED, the email format is valid
+- If SMTP check is SKIPPED but status is 'valid' and score is 90-100, this is likely a public provider email - treat as HIGHLY VALID
+- Low confidence should be due to deliverability issues (no MX records, domain doesn't exist), NOT due to format validity or public provider domains
+- Focus on actual deliverability risks: missing MX records, disposable domains, role-based addresses, typo domains, etc.
+- DO NOT penalize public provider emails for SMTP check failures - these providers intentionally block SMTP verification
+- DO NOT trust MX records for typo domains - they are likely spam traps
 
+" . ($hasPlus ? "NOTE: This email contains '+'. If mentioned, note it's valid for aliasing.\n\n" : "🚫 CRITICAL PROHIBITION - READ CAREFULLY:\nThe '+' character is NOT present in this email address ({$email}).\n\nDO NOT write ANY of these phrases:\n- 'it's worth noting that the + character'\n- 'the + character is allowed'\n- 'however, the + character'\n- 'the + character in the local part'\n- 'RFC 5322' in relation to '+'\n- Any mention of 'aliasing' related to '+'\n\nWrite your analysis as if '+' does not exist. Focus ONLY on what is actually in the email: domain type, MX records, deliverability.\n\n") . "
 Provide a JSON response with:
-1. 'insights': A brief analysis focusing on deliverability issues (MX records, domain validity, etc.), NOT format validity (since syntax check already passed)
-2. 'confidence': A score from 0-100 based on deliverability likelihood (not format validity)
-3. 'suggested_status': One of: valid, invalid, risky, catch_all, do_not_mail
-4. 'risk_factors': Array of potential risk factors (e.g., ['missing_mx_records', 'domain_not_resolvable'])
+1. 'insights': A brief analysis focusing on deliverability issues (MX records, domain validity, etc.), NOT format validity (since syntax check already passed). " . ($isTypoDomain ? "⚠️ CRITICAL: If this is a typo domain, mention it's a spam trap and mark as SPAMTRAP/INVALID even if MX records exist.\n" : '') . " " . ($hasPlus ? "You may mention '+' if relevant." : "DO NOT mention '+' character - it's not in this email.") . "
+2. 'confidence': A score from 0-100 based on deliverability likelihood (not format validity). " . ($isTypoDomain ? "If typo domain, use 0-20% confidence.\n" : '') . "
+3. 'suggested_status': One of: valid, invalid, risky, catch_all, do_not_mail, spamtrap. " . ($isTypoDomain ? "If typo domain, use 'spamtrap' or 'invalid'.\n" : '') . "
+4. 'risk_factors': Array of potential risk factors (e.g., ['missing_mx_records', 'domain_not_resolvable'" . ($isTypoDomain ? ", 'typo_domain'" : '') . "])
 
 Focus on:
 - Domain deliverability (MX records, domain existence)
 - Domain reputation and patterns
 - Common spam/abuse indicators
 - Deliverability best practices
-- DO NOT flag valid characters (like '+' in local part) as issues";
+" . ($isTypoDomain ? "- ⚠️ CRITICAL: Typo domains are spam traps - do NOT trust MX records for typo domains\n" : '') . "
+" . ($hasPlus ? "- If '+' is present, you may note it's valid for aliasing\n" : "- DO NOT mention '+' character - it's not in this email\n") . "
+- ONLY discuss features that are ACTUALLY present in the email address";
     }
 
     /**

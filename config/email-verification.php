@@ -50,7 +50,7 @@ return [
     |--------------------------------------------------------------------------
     |
     | Rate limiting to prevent getting banned by SMTP servers.
-    | 
+    |
     | Real-world limits:
     | - Gmail: ~100 per IP per hour (conservative: 20-30 per minute)
     | - Outlook/Hotmail: ~50-100 per IP per hour (conservative: 10-20 per minute)
@@ -103,18 +103,18 @@ return [
         'abuse', 'admin', 'billing', 'compliance', 'hostmaster', 'legal',
         'noc', 'postmaster', 'privacy', 'registrar', 'root', 'security',
         'webmaster', 'support', // Support is often treated as high-risk by ESPs
-        
+
         // RFC 2142 technical addresses (not for marketing)
         'mailer-daemon', 'maildaemon', 'daemon', 'ftp', 'usenet', 'news', 'uucp',
-        
+
         // Common role-based addresses
         'dns', 'inoc', 'ispfeedback', 'ispsupport', 'list-request', 'list',
         'sysadmin', 'tech', 'undisclosed-recipients', 'unsubscribe',
         'www', 'info', 'contact', 'sales', 'marketing', 'help',
-        
+
         // Security/phishing related
         'phish', 'phishing', 'spam',
-        
+
         // Legacy/null addresses
         'devnull', 'null',
     ],
@@ -243,14 +243,15 @@ return [
     */
 
     'typo_domains' => [
-        // Gmail typos
-        'gmial.com', 'gmai.com', 'gnail.com', 'gmal.com',
+        // Gmail typos (common misspellings)
+        'gmial.com', 'gmai.com', 'gnail.com', 'gmal.com', 'gmailc.com', 'gmaill.com',
+        'gmaol.com', 'gmaio.com', 'gmaill.com', 'gmailll.com', 'gmail.co', 'gmail.cm',
         // Hotmail/Outlook typos
-        'hotnail.com', 'hotmai.com', 'hotmal.com',
+        'hotnail.com', 'hotmai.com', 'hotmal.com', 'hotmial.com', 'hotmali.com',
         // Yahoo typos
-        'yahho.com', 'yaho.com',
+        'yahho.com', 'yaho.com', 'yhaoo.com', 'yhoo.com',
         // Outlook typos
-        'outlok.com', 'outllok.com',
+        'outlok.com', 'outllok.com', 'outlokc.com',
     ],
 
     /*
@@ -317,6 +318,576 @@ return [
         'enable_typo_check' => env('EMAIL_VERIFICATION_ENABLE_TYPO_CHECK', true),
         'enable_isp_esp_check' => env('EMAIL_VERIFICATION_ENABLE_ISP_ESP_CHECK', true),
         'enable_government_check' => env('EMAIL_VERIFICATION_ENABLE_GOVERNMENT_CHECK', true),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | MX Skip List
+    |--------------------------------------------------------------------------
+    |
+    | List of MX server hostnames that should be skipped during SMTP checks.
+    | These servers are known to block SMTP verification attempts or return
+    | errors that prevent proper verification.
+    |
+    | MX servers can be automatically added to this list if they fail
+    | SMTP connection or return specific error patterns (see mx_skip_auto_add).
+    |
+    */
+
+    'mx_skip_list' => [
+        'securence.com',
+        'mailanyone.net',
+        'mimecast.com',
+        // Manual entries (never expire)
+        // Automatically added servers are stored in database (mx_skip_list table)
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | MX Skip Auto-Add
+    |--------------------------------------------------------------------------
+    |
+    | Automatically add MX servers to skip list when they fail SMTP connection
+    | or return specific error patterns. This helps avoid repeated failures
+    | on problematic servers.
+    |
+    | Auto-added servers are stored in database and expire after the specified
+    | number of days. Manual entries (from config) never expire.
+    |
+    */
+
+    'mx_skip_auto_add' => env('EMAIL_VERIFICATION_MX_SKIP_AUTO_ADD', true),
+    'mx_skip_auto_add_expires_days' => env('EMAIL_VERIFICATION_MX_SKIP_EXPIRES_DAYS', 30),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Unsupported Domains
+    |--------------------------------------------------------------------------
+    |
+    | Domains that do not support SMTP verification. These domains will be
+    | marked as 'skipped' status instead of attempting SMTP check.
+    |
+    | Examples: mimecast.com, yahoo.co (not yahoo.com)
+    |
+    */
+
+    'unsupported_domains' => [
+        'mimecast.com',
+        'yahoo.co', // Note: yahoo.com is supported, but yahoo.co is not
+    ],
+
+    'unsupported_domain_status' => 'skipped',
+
+    /*
+    |--------------------------------------------------------------------------
+    | Catch-All Skip Domains
+    |--------------------------------------------------------------------------
+    |
+    | Domains that should skip catch-all detection because they are known
+    | to be catch-all servers (typically public email providers).
+    |
+    | These domains will not be tested for catch-all behavior to save time.
+    |
+    */
+
+    'catch_all_skip_domains' => [
+        // Google/Gmail
+        'gmail.com',
+        'google.com',
+        'googlemail.com',
+        
+        // Yahoo
+        'yahoo.com',
+        'yahoo.co.uk',
+        'yahoo.fr',
+        'yahoo.de',
+        'yahoo.es',
+        'yahoo.it',
+        'yahoo.co.jp',
+        'yahoo.co.in',
+        'yahoo.com.au',
+        'yahoo.com.br',
+        'yahoo.ca',
+        'yahoo.com.mx',
+        'yahoo.com.sg',
+        'yahoo.com.tw',
+        'yahoo.com.hk',
+        'yahoodns.net',
+        'yahoo.net',
+        'yahoo.org',
+        'ymail.com',
+        'rocketmail.com',
+        
+        // Microsoft/Outlook
+        'outlook.com',
+        'outlook.fr',
+        'outlook.de',
+        'outlook.es',
+        'outlook.it',
+        'outlook.co.uk',
+        'outlook.jp',
+        'outlook.in',
+        'outlook.com.au',
+        'hotmail.com',
+        'hotmail.fr',
+        'hotmail.de',
+        'hotmail.es',
+        'hotmail.it',
+        'hotmail.co.uk',
+        'hotmail.jp',
+        'hotmail.in',
+        'hotmail.com.au',
+        'live.com',
+        'live.fr',
+        'live.de',
+        'live.co.uk',
+        'live.jp',
+        'msn.com',
+        'passport.com',
+        'passport.net',
+        
+        // Mail.ru
+        'mail.ru',
+        'inbox.ru',
+        'list.ru',
+        'bk.ru',
+        'internet.ru',
+        
+        // Yandex
+        'yandex.com',
+        'yandex.ru',
+        'yandex.ua',
+        'yandex.by',
+        'yandex.kz',
+        'ya.ru',
+        
+        // AOL
+        'aol.com',
+        'aol.fr',
+        'aol.de',
+        'aol.co.uk',
+        
+        // Apple/iCloud
+        'icloud.com',
+        'icloud.com.cn',
+        'me.com',
+        'mac.com',
+        
+        // ProtonMail
+        'protonmail.com',
+        'proton.me',
+        'pm.me',
+        
+        // Zoho
+        'zoho.com',
+        'zoho.eu',
+        'zoho.in',
+        'zoho.com.cn',
+        
+        // GMX
+        'gmx.com',
+        'gmx.de',
+        'gmx.fr',
+        'gmx.co.uk',
+        'gmx.net',
+        
+        // Mail.com
+        'mail.com',
+        'email.com',
+        'usa.com',
+        'myself.com',
+        'consultant.com',
+        
+        // FastMail
+        'fastmail.com',
+        'fastmail.fm',
+        
+        // Tutanota
+        'tutanota.com',
+        'tutanota.de',
+        'tutamail.com',
+        
+        // European providers
+        'web.de',
+        't-online.de',
+        'orange.fr',
+        'orange.com',
+        'wanadoo.fr',
+        'laposte.net',
+        'libero.it',
+        'virgilio.it',
+        'alice.it',
+        'aliceadsl.fr',
+        'sfr.fr',
+        'free.fr',
+        'neuf.fr',
+        'posteo.de',
+        'posteo.net',
+        'mailbox.org',
+        
+        // Latin America providers
+        'terra.com',
+        'terra.com.br',
+        'terra.es',
+        'terra.cl',
+        'terra.com.mx',
+        'uol.com.br',
+        'bol.com.br',
+        
+        // Asian providers
+        'qq.com',
+        '163.com',
+        '126.com',
+        'yeah.net',
+        'vip.163.com',
+        'vip.126.com',
+        'sina.com',
+        'sina.cn',
+        'sohu.com',
+        'naver.com',
+        'daum.net',
+        
+        // Russian/CIS providers
+        'rambler.ru',
+        'mail.ua',
+        
+        // Other providers
+        'comcast.net',
+        'rediffmail.com',
+        'rediff.com',
+        'hushmail.com',
+        'hush.com',
+        'runbox.com',
+        'startmail.com',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | SMTP Error Patterns
+    |--------------------------------------------------------------------------
+    |
+    | Error message patterns that indicate an MX server is blocking SMTP
+    | verification attempts. When these patterns are detected, the MX server
+    | will be automatically added to the skip list (if auto-add is enabled).
+    |
+    */
+
+    'smtp_error_patterns' => [
+        'blocked by prs',
+        'unsolicited mail',
+        '550 5.7.1',
+        '550 5.1.1',
+        '550 5.2.1',
+        '550 5.7.133',
+        '554 5.4.14',
+        'administrative prohibition',
+        'not allowed',
+        'policy violation',
+        'relay access denied',
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Public Email Providers
+    |--------------------------------------------------------------------------
+    |
+    | Configuration for public email providers (Gmail, Yahoo, Outlook, etc.).
+    | These providers often block SMTP verification, so we use special handling:
+    | - Skip SMTP check if configured
+    | - Mark as valid if MX records exist (for known providers)
+    | - Use specific status based on provider configuration
+    |
+    */
+
+    'public_providers' => [
+        'gmail' => [
+            'domains' => ['gmail.com', 'googlemail.com'],
+            'mx_patterns' => ['google.com', 'gmail-smtp-in.l.google.com', 'aspmx.l.google.com'],
+            'skip_smtp' => true,
+            'status' => 'valid', // If MX records exist, consider valid
+        ],
+        'yahoo' => [
+            'domains' => [
+                'yahoo.com', 'yahoo.co.uk', 'yahoo.fr', 'yahoo.de', 'yahoo.es', 'yahoo.it',
+                'yahoo.co.jp', 'yahoo.co.in', 'yahoo.com.au', 'yahoo.com.br', 'yahoo.ca',
+                'yahoo.com.mx', 'yahoo.com.sg', 'yahoo.com.tw', 'yahoo.com.hk',
+                'ymail.com', 'rocketmail.com', 'yahoo.net', 'yahoo.org',
+            ],
+            'mx_patterns' => ['yahoodns.net', 'yahoo.net', 'mta.am0.yahoodns.net'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'outlook' => [
+            'domains' => [
+                'outlook.com', 'outlook.fr', 'outlook.de', 'outlook.es', 'outlook.it',
+                'outlook.co.uk', 'outlook.jp', 'outlook.in', 'outlook.com.au',
+                'hotmail.com', 'hotmail.fr', 'hotmail.de', 'hotmail.es', 'hotmail.it',
+                'hotmail.co.uk', 'hotmail.jp', 'hotmail.in', 'hotmail.com.au',
+                'live.com', 'live.fr', 'live.de', 'live.co.uk', 'live.jp',
+                'msn.com', 'passport.com', 'passport.net',
+            ],
+            'mx_patterns' => ['outlook.com', 'hotmail.com', 'mail.protection.outlook.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'mailru' => [
+            'domains' => ['mail.ru', 'inbox.ru', 'list.ru', 'bk.ru', 'internet.ru'],
+            'mx_patterns' => ['mail.ru', 'mxs.mail.ru'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'yandex' => [
+            'domains' => ['yandex.com', 'yandex.ru', 'ya.ru', 'yandex.ua', 'yandex.by', 'yandex.kz'],
+            'mx_patterns' => ['yandex.com', 'yandex.ru', 'mx.yandex.ru'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'aol' => [
+            'domains' => ['aol.com', 'aol.fr', 'aol.de', 'aol.co.uk'],
+            'mx_patterns' => ['mx-aol.mail', 'yahoodns.net', 'aol.com'], // AOL uses Yahoo MX
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'icloud' => [
+            'domains' => ['icloud.com', 'me.com', 'mac.com', 'icloud.com.cn'],
+            'mx_patterns' => ['icloud.com', 'apple.com', 'mx01.mail.icloud.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'protonmail' => [
+            'domains' => ['protonmail.com', 'proton.me', 'pm.me'],
+            'mx_patterns' => ['protonmail.com', 'protonmail.ch', 'mail.protonmail.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'zoho' => [
+            'domains' => ['zoho.com', 'zoho.eu', 'zoho.in', 'zoho.com.cn'],
+            'mx_patterns' => ['zoho.com', 'mx.zoho.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'gmx' => [
+            'domains' => ['gmx.com', 'gmx.de', 'gmx.fr', 'gmx.co.uk', 'gmx.net'],
+            'mx_patterns' => ['gmx.com', 'gmx.net', 'mail.gmx.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'mail' => [
+            'domains' => ['mail.com', 'email.com', 'usa.com', 'myself.com', 'consultant.com'],
+            'mx_patterns' => ['mail.com', 'mx.mail.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'fastmail' => [
+            'domains' => ['fastmail.com', 'fastmail.fm'],
+            'mx_patterns' => ['fastmail.com', 'in1.smtp.messagingengine.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'tutanota' => [
+            'domains' => ['tutanota.com', 'tutanota.de', 'tutamail.com'],
+            'mx_patterns' => ['tutanota.com', 'mail.tutanota.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'webde' => [
+            'domains' => ['web.de', 'gmx.de'],
+            'mx_patterns' => ['web.de', 'gmx.net', 'mail.gmx.net'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        't-online' => [
+            'domains' => ['t-online.de'],
+            'mx_patterns' => ['t-online.de', 'mail.t-online.de'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'orange' => [
+            'domains' => ['orange.fr', 'orange.com', 'wanadoo.fr'],
+            'mx_patterns' => ['orange.fr', 'orange.com', 'mail.orange.fr'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'laposte' => [
+            'domains' => ['laposte.net'],
+            'mx_patterns' => ['laposte.net', 'mail.laposte.net'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'libero' => [
+            'domains' => ['libero.it'],
+            'mx_patterns' => ['libero.it', 'mail.libero.it'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'virgilio' => [
+            'domains' => ['virgilio.it'],
+            'mx_patterns' => ['virgilio.it', 'mail.virgilio.it'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'alice' => [
+            'domains' => ['alice.it', 'aliceadsl.fr'],
+            'mx_patterns' => ['alice.it', 'mail.alice.it'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'terra' => [
+            'domains' => ['terra.com', 'terra.com.br', 'terra.es', 'terra.cl', 'terra.com.mx'],
+            'mx_patterns' => ['terra.com', 'mail.terra.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'uol' => [
+            'domains' => ['uol.com.br'],
+            'mx_patterns' => ['uol.com.br', 'mail.uol.com.br'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'bol' => [
+            'domains' => ['bol.com.br'],
+            'mx_patterns' => ['bol.com.br', 'mail.bol.com.br'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'netease' => [
+            'domains' => ['163.com', '126.com', 'yeah.net', 'vip.163.com', 'vip.126.com'],
+            'mx_patterns' => ['163.com', '126.com', 'yeah.net', 'mail.163.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'qq' => [
+            'domains' => ['qq.com'],
+            'mx_patterns' => ['qq.com', 'mx.qq.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'sina' => [
+            'domains' => ['sina.com', 'sina.cn'],
+            'mx_patterns' => ['sina.com', 'mail.sina.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'sohu' => [
+            'domains' => ['sohu.com'],
+            'mx_patterns' => ['sohu.com', 'mail.sohu.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'rediffmail' => [
+            'domains' => ['rediffmail.com', 'rediff.com'],
+            'mx_patterns' => ['rediffmail.com', 'mail.rediffmail.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'mailru' => [
+            'domains' => ['mail.ru', 'inbox.ru', 'list.ru', 'bk.ru', 'internet.ru'],
+            'mx_patterns' => ['mail.ru', 'mxs.mail.ru'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'rambler' => [
+            'domains' => ['rambler.ru'],
+            'mx_patterns' => ['rambler.ru', 'mail.rambler.ru'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'naver' => [
+            'domains' => ['naver.com'],
+            'mx_patterns' => ['naver.com', 'mail.naver.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'daum' => [
+            'domains' => ['daum.net'],
+            'mx_patterns' => ['daum.net', 'mail.daum.net'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'hushmail' => [
+            'domains' => ['hushmail.com', 'hush.com'],
+            'mx_patterns' => ['hushmail.com', 'mail.hushmail.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'runbox' => [
+            'domains' => ['runbox.com'],
+            'mx_patterns' => ['runbox.com', 'mail.runbox.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'startmail' => [
+            'domains' => ['startmail.com'],
+            'mx_patterns' => ['startmail.com', 'mail.startmail.com'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'posteo' => [
+            'domains' => ['posteo.de', 'posteo.net'],
+            'mx_patterns' => ['posteo.de', 'posteo.net'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+        'mailbox' => [
+            'domains' => ['mailbox.org'],
+            'mx_patterns' => ['mailbox.org', 'mail.mailbox.org'],
+            'skip_smtp' => true,
+            'status' => 'valid',
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Catch-All Detection
+    |--------------------------------------------------------------------------
+    |
+    | Enable catch-all server detection. When enabled, the system will test
+    | if a domain accepts any email address by sending a random email to
+    | the domain's MX server.
+    |
+    | Note: This is disabled by default as it adds significant overhead
+    | and most public providers are catch-all anyway.
+    |
+    */
+
+    'enable_catch_all_detection' => env('EMAIL_VERIFICATION_CATCH_ALL', false),
+    'catch_all_status' => 'catch_all',
+
+    /*
+    |--------------------------------------------------------------------------
+    | Greylisting Detection
+    |--------------------------------------------------------------------------
+    |
+    | Enable automatic retry for greylisting servers (4xx responses).
+    | Some servers temporarily reject emails and accept them on retry.
+    |
+    | When enabled, the system will wait and retry RCPT TO command if it
+    | receives a 4xx response (temporary failure).
+    |
+    */
+
+    'enable_greylisting_retry' => env('EMAIL_VERIFICATION_GREYLISTING_RETRY', true),
+    'greylisting_retry_delay' => env('EMAIL_VERIFICATION_GREYLISTING_DELAY', 2), // seconds
+
+    /*
+    |--------------------------------------------------------------------------
+    | SMTP Error Messages
+    |--------------------------------------------------------------------------
+    |
+    | Human-readable error messages for different SMTP response codes.
+    | Used to provide better error information to users.
+    |
+    */
+
+    'smtp_error_messages' => [
+        450 => 'Mailbox temporarily unavailable (greylisting)',
+        451 => 'Requested action aborted: local error',
+        452 => 'Insufficient system storage',
+        550 => 'Mailbox unavailable',
+        551 => 'User not local',
+        552 => 'Exceeded storage allocation',
+        553 => 'Mailbox name not allowed',
+        554 => 'Transaction failed',
     ],
 ];
 
