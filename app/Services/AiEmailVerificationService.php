@@ -426,32 +426,44 @@ class AiEmailVerificationService
      */
     private function buildPrompt(string $email, array $traditionalResult): string
     {
-        $parts = explode('@', $email);
+        $parts = explode('@', $email, 2);
+        $localPart = $parts[0] ?? '';
         $domain = $parts[1] ?? '';
 
         return "Analyze this email address: {$email}
 
+Email structure:
+- Local part (before @): {$localPart}
+- Domain (after @): {$domain}
+
+IMPORTANT: The '+' character in the local part (before @) is VALID according to RFC 5322. It's commonly used for email aliasing (e.g., user+tag@example.com). The '+' character is NOT allowed in the domain part (after @).
+
 Traditional verification results:
-- Syntax check: " . ($traditionalResult['checks']['syntax'] ? 'PASS' : 'FAIL') . "
+- Syntax check: " . ($traditionalResult['checks']['syntax'] ? 'PASS (email format is valid)' : 'FAIL (email format is invalid)') . "
 - MX records: " . ($traditionalResult['checks']['mx'] ? 'FOUND' : 'NOT FOUND') . "
 - SMTP check: " . ($traditionalResult['checks']['smtp'] ? 'PASS' : 'FAIL') . "
 - Disposable email: " . ($traditionalResult['checks']['disposable'] ? 'YES' : 'NO') . "
 - Role-based email: " . ($traditionalResult['checks']['role'] ? 'YES' : 'NO') . "
 - Current status: {$traditionalResult['status']}
 - Current score: {$traditionalResult['score']}/100
-- Domain: {$domain}
+
+Analysis guidelines:
+- If syntax check PASSED, the email format is valid (including '+' in local part)
+- Low confidence should be due to deliverability issues (no MX records, domain doesn't exist), NOT due to valid characters in local part
+- Focus on actual deliverability risks: missing MX records, disposable domains, role-based addresses, etc.
 
 Provide a JSON response with:
-1. 'insights': A brief analysis of the email's deliverability and potential issues
-2. 'confidence': A score from 0-100 indicating your confidence in the email's validity
+1. 'insights': A brief analysis focusing on deliverability issues (MX records, domain validity, etc.), NOT format validity (since syntax check already passed)
+2. 'confidence': A score from 0-100 based on deliverability likelihood (not format validity)
 3. 'suggested_status': One of: valid, invalid, risky, catch_all, do_not_mail
-4. 'risk_factors': Array of potential risk factors (e.g., ['suspicious_domain', 'low_reputation'])
+4. 'risk_factors': Array of potential risk factors (e.g., ['missing_mx_records', 'domain_not_resolvable'])
 
-Consider:
-- Domain reputation patterns
-- Email format patterns
+Focus on:
+- Domain deliverability (MX records, domain existence)
+- Domain reputation and patterns
 - Common spam/abuse indicators
-- Deliverability best practices";
+- Deliverability best practices
+- DO NOT flag valid characters (like '+' in local part) as issues";
     }
 
     /**

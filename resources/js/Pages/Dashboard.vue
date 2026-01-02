@@ -3,6 +3,9 @@ import { ref, onMounted, nextTick } from 'vue';
 import { router } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
 
+const STORAGE_KEY = 'email_verification_chat_history';
+const MAX_MESSAGES = 50;
+
 const messages = ref([]);
 const input = ref('');
 const isProcessing = ref(false);
@@ -17,6 +20,36 @@ const scrollToBottom = () => {
     });
 };
 
+const saveMessagesToStorage = () => {
+    try {
+        // Keep only last 50 messages
+        const messagesToSave = messages.value.slice(-MAX_MESSAGES);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(messagesToSave));
+    } catch (e) {
+        console.error('Failed to save messages to localStorage:', e);
+    }
+};
+
+const loadMessagesFromStorage = () => {
+    try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+            const parsedMessages = JSON.parse(stored);
+            // Restore timestamps as Date objects
+            parsedMessages.forEach(msg => {
+                if (msg.timestamp) {
+                    msg.timestamp = new Date(msg.timestamp);
+                }
+            });
+            messages.value = parsedMessages;
+            // Scroll to bottom after loading
+            scrollToBottom();
+        }
+    } catch (e) {
+        console.error('Failed to load messages from localStorage:', e);
+    }
+};
+
 const addMessage = (content, type = 'assistant', data = null) => {
     messages.value.push({
         id: Date.now() + Math.random(),
@@ -25,6 +58,13 @@ const addMessage = (content, type = 'assistant', data = null) => {
         data,
         timestamp: new Date(),
     });
+    
+    // Keep only last 50 messages
+    if (messages.value.length > MAX_MESSAGES) {
+        messages.value = messages.value.slice(-MAX_MESSAGES);
+    }
+    
+    saveMessagesToStorage();
     scrollToBottom();
 };
 
@@ -179,6 +219,12 @@ const verifySingleEmail = async (email) => {
                                         timestamp: new Date(),
                                     };
                                     messages.value.push(currentMessage);
+                                    
+                                    // Keep only last 50 messages
+                                    if (messages.value.length > MAX_MESSAGES) {
+                                        messages.value = messages.value.slice(-MAX_MESSAGES);
+                                    }
+                                    saveMessagesToStorage();
                                 }
                                 
                                 currentMessage.steps.push({
@@ -191,13 +237,14 @@ const verifySingleEmail = async (email) => {
                                 currentMessage.content = data.message;
                                 scrollToBottom();
                             } else if (data.type === 'result') {
-                                if (currentMessage) {
-                                    currentMessage.isProcessing = false;
-                                    currentMessage.result = data.data;
-                                    currentMessage.content = formatResult(data.data);
-                                } else {
-                                    addMessage(formatResult(data.data), 'assistant', data.data);
-                                }
+                            if (currentMessage) {
+                                currentMessage.isProcessing = false;
+                                currentMessage.result = data.data;
+                                currentMessage.content = formatResult(data.data);
+                                saveMessagesToStorage();
+                            } else {
+                                addMessage(formatResult(data.data), 'assistant', data.data);
+                            }
                                 scrollToBottom();
                             }
                         } catch (e) {
@@ -291,6 +338,12 @@ const verifyBatchEmails = async (emailsText) => {
                                     timestamp: new Date(),
                                 };
                                 messages.value.push(currentBatchMessage);
+                                
+                                // Keep only last 50 messages
+                                if (messages.value.length > MAX_MESSAGES) {
+                                    messages.value = messages.value.slice(-MAX_MESSAGES);
+                                }
+                                saveMessagesToStorage();
                             }
                             
                             // Check if email already exists, if not add it
@@ -350,6 +403,7 @@ const verifyBatchEmails = async (emailsText) => {
                                 currentBatchMessage.content = formatBatchResult(data.summary);
                                 currentBatchMessage.bulkJobId = data.bulk_job_id;
                                 currentBatchMessage.summary = data.summary;
+                                saveMessagesToStorage();
                             }
                             scrollToBottom();
                         }
@@ -425,6 +479,12 @@ const verifyFile = async (file) => {
                                     timestamp: new Date(),
                                 };
                                 messages.value.push(currentBatchMessage);
+                                
+                                // Keep only last 50 messages
+                                if (messages.value.length > MAX_MESSAGES) {
+                                    messages.value = messages.value.slice(-MAX_MESSAGES);
+                                }
+                                saveMessagesToStorage();
                             }
                             
                             // Check if email already exists
@@ -558,7 +618,13 @@ const handleKeyPress = (e) => {
 };
 
 onMounted(() => {
-    addMessage('Hello! I can help you verify email addresses.\n\nYou can:\n- Enter a single email\n- Paste multiple emails (one per line, comma, or semicolon separated)\n- Upload a CSV/TXT file using the 📎 button', 'assistant');
+    // Load saved messages from storage
+    loadMessagesFromStorage();
+    
+    // Only add welcome message if there are no saved messages
+    if (messages.value.length === 0) {
+        addMessage('Hello! I can help you verify email addresses.\n\nYou can:\n- Enter a single email\n- Paste multiple emails (one per line, comma, or semicolon separated)\n- Upload a CSV/TXT file using the 📎 button', 'assistant');
+    }
 });
 </script>
 
