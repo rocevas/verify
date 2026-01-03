@@ -937,6 +937,9 @@ class EmailVerificationService
                 'typo_domain' => false,
                 'isp_esp' => false,
                 'government_tld' => false,
+                'mailbox_full' => false,
+                'free' => false,
+                'is_free' => false,
             ],
             'score' => 0,
             'error' => null,
@@ -988,6 +991,8 @@ class EmailVerificationService
                 // Set free flag early (by domain name only)
                 $result['is_free'] = $this->isFreeEmailProviderByDomain($parts['domain']);
                 $result['free'] = $result['is_free']; // Keep for backward compatibility
+                $result['checks']['free'] = $result['free']; // Add to checks for score calculation
+                $result['checks']['is_free'] = $result['is_free']; // Also add is_free for compatibility
                 
                 $result['status'] = 'invalid';
                 $result['error'] = $this->getErrorMessages()['invalid_syntax'];
@@ -1087,6 +1092,9 @@ class EmailVerificationService
             if ($disposableCheck) {
                 // Set free flag early (by domain name only)
                 $result['free'] = $this->isFreeEmailProviderByDomain($parts['domain']);
+                $result['is_free'] = $result['free']; // Keep for backward compatibility
+                $result['checks']['free'] = $result['free']; // Add to checks for score calculation
+                $result['checks']['is_free'] = $result['is_free']; // Also add is_free for compatibility
                 
                 $result['status'] = 'do_not_mail';
                 $result['score'] = 0;
@@ -1151,6 +1159,8 @@ class EmailVerificationService
             // Set free flag if domain is a public provider (free email provider)
             $result['is_free'] = $publicProvider !== null;
             $result['free'] = $result['is_free']; // Keep for backward compatibility
+            $result['checks']['free'] = $result['free']; // Add to checks for score calculation
+            $result['checks']['is_free'] = $result['is_free']; // Also add is_free for compatibility
             
             if ($publicProvider && ($publicProvider['skip_smtp'] ?? false)) {
                 // Skip SMTP check for public providers, but mark as valid if MX records exist
@@ -1158,8 +1168,18 @@ class EmailVerificationService
                     $result['status'] = $publicProvider['status'] ?? 'valid';
                     $result['smtp'] = false; // Not checked, but valid (public providers block SMTP checks)
                     $result['checks']['smtp'] = false; // Update checks array
-                    // For public providers, give full score since they're known valid providers
-                    $result['score'] = 100; // Public providers are always valid if MX records exist
+                    $result['mailbox_full'] = false; // Not checked (public providers are assumed to have space)
+                    $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
+                    
+                    // Calculate score with new system (without SMTP check)
+                    // Public providers get high score: syntax (20) + domain_validity (20) + mx_record (25) + disposable (10) = 75
+                    // Add bonus for being known public provider = 15 points
+                    $result['score'] = $this->calculateScore($result['checks']);
+                    if ($result['score'] >= 70) {
+                        // Bonus for known public providers (they're trusted)
+                        $result['score'] = min(95, $result['score'] + 15);
+                    }
+                    
                     $result['error'] = null; // Clear any errors
                     $this->addDuration($result, $startTime);
                     // Determine state and result before saving
@@ -1167,7 +1187,7 @@ class EmailVerificationService
                     $result['state'] = $stateAndResult['state'];
                     $result['result'] = $stateAndResult['result'];
                     $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                    return $result;
+                    return $this->formatResponse($result);
                 }
             }
 
@@ -1185,17 +1205,20 @@ class EmailVerificationService
                         $result['smtp'] = $smtpCheck;
                         $result['checks']['smtp'] = $smtpCheck; // Update checks array
                         $result['mailbox_full'] = $smtpResult['mailbox_full'] ?? false;
+                        $result['checks']['mailbox_full'] = $result['mailbox_full']; // Add to checks for score calculation
                         
                         // Recalculate score after SMTP check
                         $result['score'] = $this->calculateScore($result['checks']);
                     } else {
                         // Rate limit exceeded, skip SMTP check
-                        $result['smtp'] = false;
-                        $result['checks']['smtp'] = false; // Update checks array
-                        Log::info('SMTP check skipped due to rate limit', [
-                            'email' => $email,
-                            'domain' => $parts['domain'],
-                        ]);
+                    $result['smtp'] = false;
+                    $result['checks']['smtp'] = false; // Update checks array
+                    $result['mailbox_full'] = false; // Not checked
+                    $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
+                    Log::info('SMTP check skipped due to rate limit', [
+                        'email' => $email,
+                        'domain' => $parts['domain'],
+                    ]);
                     }
                 } catch (\Exception $e) {
                     Log::warning('SMTP check failed', [
@@ -1205,10 +1228,14 @@ class EmailVerificationService
                     ]);
                     $result['smtp'] = false;
                     $result['checks']['smtp'] = false; // Update checks array
+                    $result['mailbox_full'] = false; // Not checked
+                    $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
                 }
             } else {
                 $result['smtp'] = false; // Not checked
                 $result['checks']['smtp'] = false; // Update checks array
+                $result['mailbox_full'] = false; // Not checked
+                $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
             }
 
             // Catch-all detection (if enabled and SMTP check didn't pass)
@@ -1234,12 +1261,18 @@ class EmailVerificationService
             // Determine final status based on config rules
             $statusRules = $this->getStatusRules();
             if ($result['smtp']) {
+                // SMTP check passed = definitely valid
                 $result['status'] = $statusRules['smtp_valid'];
-            } elseif ($result['score'] >= ($statusRules['min_score_for_catch_all'] ?? 50)) {
+            } elseif ($result['score'] >= ($statusRules['min_score_for_valid'] ?? 85)) {
+                // High score without SMTP (likely public provider or known good domain)
+                $result['status'] = 'valid';
+            } elseif ($result['score'] >= ($statusRules['min_score_for_catch_all'] ?? 70)) {
+                // Medium score = catch-all or risky
                 $result['status'] = $result['role'] 
                     ? ($statusRules['role_emails_status'] ?? 'risky')
                     : ($statusRules['non_role_emails_status'] ?? 'catch_all');
             } else {
+                // Low score = invalid
                 $result['status'] = $statusRules['default_invalid'] ?? 'invalid';
             }
 
@@ -2052,6 +2085,16 @@ class EmailVerificationService
         }
     }
 
+    /**
+     * Calculate verification score based on checks
+     * Improved scoring system inspired by Go email-verifier:
+     * - More balanced weights (not too dependent on SMTP)
+     * - Domain validity included in score
+     * - Better handling of public providers (SMTP often unavailable)
+     * 
+     * @param array $checks
+     * @return int Score from 0 to 100
+     */
     private function calculateScore(array $checks): int
     {
         $weights = $this->getScoreWeights();
@@ -2067,27 +2110,62 @@ class EmailVerificationService
         if ($checks['isp_esp'] ?? false) {
             return 0; // ISP/ESP domains = 0
         }
+        if ($checks['blacklist'] ?? false) {
+            return 0; // Blacklisted emails = 0
+        }
 
+        // Base checks (required for any score)
         if ($checks['syntax'] ?? false) {
-            $score += $weights['syntax'] ?? 10;
+            $score += $weights['syntax'] ?? 20;
+        } else {
+            // No syntax = no score
+            return 0;
         }
 
+        // Domain validity check (DNS resolution)
+        if ($checks['domain_validity'] ?? false) {
+            $score += $weights['domain_validity'] ?? 20;
+        } else {
+            // Domain doesn't exist = very low score
+            return max(0, $score);
+        }
+
+        // MX records check
         if ($checks['mx_record'] ?? false) {
-            $score += $weights['mx_record'] ?? 30;
+            $score += $weights['mx_record'] ?? 25;
         }
 
+        // SMTP check (optional, often unavailable for public providers)
         if ($checks['smtp'] ?? false) {
-            $score += $weights['smtp'] ?? 50;
+            $score += $weights['smtp'] ?? 25;
         }
+        // Note: If SMTP is not checked (public providers), score can still be high
+        // if domain_validity and mx_record pass (up to 65 points)
 
+        // Disposable email check (negative check - add points if NOT disposable)
         if (!($checks['disposable'] ?? false)) {
             $score += $weights['disposable'] ?? 10;
         } else {
             $score = 0; // Disposable emails get 0
+            return 0;
         }
 
+        // Role-based email penalty (reduces score but doesn't zero it)
         if ($checks['role'] ?? false) {
-            $score -= $weights['role_penalty'] ?? 20; // Penalty for role-based emails
+            $score -= $weights['role_penalty'] ?? 10; // Reduced penalty
+        }
+
+        // Mailbox full penalty (significant penalty - email cannot receive mail)
+        if ($checks['mailbox_full'] ?? false) {
+            $score -= $weights['mailbox_full_penalty'] ?? 30; // Significant penalty
+        }
+
+        // Free email provider penalty (small penalty - free emails can be less reliable)
+        if ($checks['free'] ?? $checks['is_free'] ?? false) {
+            $freePenalty = $weights['free_email_penalty'] ?? 5;
+            if ($freePenalty > 0) {
+                $score -= $freePenalty; // Small penalty for free email providers
+            }
         }
 
         // Government TLD penalty (reduces score but doesn't zero it)
@@ -2095,6 +2173,7 @@ class EmailVerificationService
             $score -= 10; // Small penalty for government TLDs
         }
 
+        // Clamp score between 0 and 100
         return max(0, min(100, $score));
     }
 

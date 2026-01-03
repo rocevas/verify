@@ -138,11 +138,14 @@ return [
     */
 
     'score_weights' => [
-        'syntax' => 10,
-        'mx_record' => 30,
-        'smtp' => 50,
+        'syntax' => 20,
+        'domain_validity' => 20, // Domain exists and is valid (DNS resolution)
+        'mx_record' => 25,
+        'smtp' => 25, // Reduced from 50, as SMTP is often unavailable for public providers
         'disposable' => 10, // Added if not disposable
-        'role_penalty' => 20, // Subtracted if role-based
+        'role_penalty' => 10, // Reduced penalty for role-based emails
+        'mailbox_full_penalty' => 30, // Penalty if mailbox is full (email cannot receive mail)
+        'free_email_penalty' => 0, // Small penalty for free email providers (disabled - no penalty)
     ],
 
     /*
@@ -181,7 +184,8 @@ return [
 
     'status_rules' => [
         'smtp_valid' => 'valid',
-        'min_score_for_catch_all' => 50,
+        'min_score_for_catch_all' => 70, // Increased from 50 to match new scoring system
+        'min_score_for_valid' => 85, // Minimum score for valid status (without SMTP)
         'role_emails_status' => 'risky',
         'non_role_emails_status' => 'catch_all',
         'default_invalid' => 'invalid',
