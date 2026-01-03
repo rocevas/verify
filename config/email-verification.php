@@ -886,7 +886,7 @@ return [
     |
     */
 
-    'enable_catch_all_detection' => env('EMAIL_VERIFICATION_CATCH_ALL', false),
+    'enable_catch_all_detection' => env('EMAIL_VERIFICATION_CATCH_ALL', true),
     'catch_all_status' => 'catch_all',
 
     /*

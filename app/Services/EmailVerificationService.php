@@ -609,48 +609,20 @@ class EmailVerificationService
     }
 
     /**
-     * Generate random email address for catch-all testing
+     * Generate random email address for catch-all testing (AfterShip method)
+     * Uses 32 alphanumeric characters like AfterShip does
      */
     private function generateRandomEmail(string $domain): string
     {
         $characters = '0123456789abcdefghijklmnopqrstuvwxyz';
         $randomString = '';
-        $length = 10;
+        $length = 32; // AfterShip uses 32 characters
         
         for ($i = 0; $i < $length; $i++) {
             $randomString .= $characters[rand(0, strlen($characters) - 1)];
         }
         
         return strtolower($randomString) . '@' . $domain;
-    }
-
-    /**
-     * Check if domain is a catch-all server
-     * Tests by sending a random email address to the domain's MX server
-     */
-    private function isCatchAllServer(string $domain): bool
-    {
-        if (!config('email-verification.enable_catch_all_detection', false)) {
-            return false;
-        }
-        
-        // Skip if domain is in catch-all skip list
-        if ($this->shouldSkipCatchAllCheck($domain)) {
-            return false;
-        }
-        
-        // Skip if domain is a public provider (they are always catch-all)
-        $mxRecords = $this->getMxRecords($domain);
-        $publicProvider = $this->isPublicProvider($domain, $mxRecords);
-        if ($publicProvider) {
-            return false; // Public providers are catch-all, but we skip detection
-        }
-        
-        // Generate random email
-        $randomEmail = $this->generateRandomEmail($domain);
-        
-        // Check if random email is accepted (if yes, it's catch-all)
-        return $this->checkSmtp($randomEmail, $domain);
     }
 
     /**
@@ -1241,7 +1213,7 @@ class EmailVerificationService
             // Calculate score before SMTP check (for faster response if SMTP fails)
             $result['score'] = $this->calculateScore($result['checks']);
 
-            // 5. SMTP check (lėčiausias check, daromas paskutinis) - wrapped in try-catch to not fail entire verification
+            // 5. SMTP check (AfterShip method: catch-all check first, then specific email if not catch-all)
             // Only perform if enabled in config and rate limit allows
             if ($this->isSmtpCheckEnabled()) {
                 try {
@@ -1249,23 +1221,71 @@ class EmailVerificationService
                     if ($this->checkSmtpRateLimit($parts['domain'])) {
                         $smtpResult = $this->checkSmtpWithDetails($email, $parts['domain']);
                         $smtpCheck = $smtpResult['valid'];
+                        $isCatchAll = $smtpResult['catch_all'] ?? false;
+                        
                         $result['smtp'] = $smtpCheck;
                         $result['checks']['smtp'] = $smtpCheck; // Update checks array
                         $result['mailbox_full'] = $smtpResult['mailbox_full'] ?? false;
                         $result['checks']['mailbox_full'] = $result['mailbox_full']; // Add to checks for score calculation
+                        $result['catch_all'] = $isCatchAll; // Store catch-all status
                         
+                        // If catch-all detected, handle it (AfterShip method)
+                        if ($isCatchAll) {
+                            $result['status'] = config('email-verification.catch_all_status', 'catch_all');
+                            
+                            // Check Gravatar for catch-all emails (helps determine if email likely exists)
+                            if (config('email-verification.enable_gravatar_check', true)) {
+                                try {
+                                    $gravatarService = app(GravatarService::class);
+                                    $gravatar = $gravatarService->checkGravatar($email);
+                                    
+                                    if ($gravatar['has_gravatar'] ?? false) {
+                                        // Email has Gravatar - more likely to exist (active user)
+                                        $weights = $this->getScoreWeights();
+                                        $gravatarBonus = $weights['gravatar_bonus'] ?? 5;
+                                        $result['score'] = min(100, max(0, $result['score'] + $gravatarBonus)); // Clamp to 0-100
+                                        $result['gravatar'] = true;
+                                        $result['gravatar_url'] = $gravatar['gravatar_url'] ?? null;
+                                    } else {
+                                        $result['gravatar'] = false;
+                                    }
+                                } catch (\Exception $e) {
+                                    // Fail gracefully - if Gravatar check fails, just continue without it
+                                    Log::debug('Gravatar check failed for catch-all email', [
+                                        'email' => $email,
+                                        'error' => $e->getMessage(),
+                                    ]);
+                                    $result['gravatar'] = false;
+                                }
+                            }
+                            
+                            // Recalculate score after Gravatar check (if applicable)
+                            $result['score'] = $this->calculateScore($result['checks']);
+                            
+                            $result['error'] = 'Catch-all server detected';
+                            $this->addDuration($result, $startTime);
+                            // Determine state and result before saving
+                            $stateAndResult = $this->determineStateAndResult($result);
+                            $result['state'] = $stateAndResult['state'];
+                            $result['result'] = $stateAndResult['result'];
+                            $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                            return $this->formatResponse($result);
+                        }
+                        
+                        // Not catch-all, so SMTP check result is valid
                         // Recalculate score after SMTP check
                         $result['score'] = $this->calculateScore($result['checks']);
                     } else {
                         // Rate limit exceeded, skip SMTP check
-                    $result['smtp'] = false;
-                    $result['checks']['smtp'] = false; // Update checks array
-                    $result['mailbox_full'] = false; // Not checked
-                    $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
-                    Log::info('SMTP check skipped due to rate limit', [
-                        'email' => $email,
-                        'domain' => $parts['domain'],
-                    ]);
+                        $result['smtp'] = false;
+                        $result['checks']['smtp'] = false; // Update checks array
+                        $result['mailbox_full'] = false; // Not checked
+                        $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
+                        $result['catch_all'] = false;
+                        Log::info('SMTP check skipped due to rate limit', [
+                            'email' => $email,
+                            'domain' => $parts['domain'],
+                        ]);
                     }
                 } catch (\Exception $e) {
                     Log::warning('SMTP check failed', [
@@ -1277,61 +1297,14 @@ class EmailVerificationService
                     $result['checks']['smtp'] = false; // Update checks array
                     $result['mailbox_full'] = false; // Not checked
                     $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
+                    $result['catch_all'] = false;
                 }
             } else {
                 $result['smtp'] = false; // Not checked
                 $result['checks']['smtp'] = false; // Update checks array
                 $result['mailbox_full'] = false; // Not checked
                 $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
-            }
-
-            // Catch-all detection (if enabled and SMTP check didn't pass)
-            // Note: Don't override score if SMTP check passed - Go skriptas doesn't do catch-all detection
-            if (!$result['smtp'] && config('email-verification.enable_catch_all_detection', false)) {
-                try {
-                    if ($this->isCatchAllServer($parts['domain'])) {
-                        $result['status'] = config('email-verification.catch_all_status', 'catch_all');
-                        // Don't override score - keep calculated score (matches Go behavior)
-                        // Go skriptas doesn't change score for catch-all, it just sets status
-                        
-                        // Check Gravatar for catch-all emails (helps determine if email likely exists)
-                        if (config('email-verification.enable_gravatar_check', true)) {
-                            try {
-                                $gravatarService = app(GravatarService::class);
-                                $gravatar = $gravatarService->checkGravatar($email);
-                                
-                                if ($gravatar['has_gravatar'] ?? false) {
-                                    // Email has Gravatar - more likely to exist (active user)
-                                    $weights = $this->getScoreWeights();
-                                    $gravatarBonus = $weights['gravatar_bonus'] ?? 5;
-                                    $result['score'] = min(100, max(0, $result['score'] + $gravatarBonus)); // Clamp to 0-100
-                                    $result['gravatar'] = true;
-                                    $result['gravatar_url'] = $gravatar['gravatar_url'] ?? null;
-                                } else {
-                                    $result['gravatar'] = false;
-                                }
-                            } catch (\Exception $e) {
-                                // Fail gracefully - if Gravatar check fails, just continue without it
-                                Log::debug('Gravatar check failed for catch-all email', [
-                                    'email' => $email,
-                                    'error' => $e->getMessage(),
-                                ]);
-                                $result['gravatar'] = false;
-                            }
-                        }
-                        
-                        $result['error'] = 'Catch-all server detected';
-                        $this->addDuration($result, $startTime);
-                        $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                        return $result;
-                    }
-                } catch (\Exception $e) {
-                    Log::warning('Catch-all detection failed', [
-                        'email' => $email,
-                        'domain' => $parts['domain'],
-                        'error' => $e->getMessage(),
-                    ]);
-                }
+                $result['catch_all'] = false;
             }
 
             // Determine final status based on config rules
@@ -1917,8 +1890,13 @@ class EmailVerificationService
     }
     
     /**
-     * Check SMTP with detailed response information
-     * Returns array with 'valid' and 'mailbox_full' flags
+     * Check SMTP with detailed response information (AfterShip method)
+     * Returns array with 'valid', 'mailbox_full', and 'catch_all' flags
+     * 
+     * AfterShip logic:
+     * 1. First check catch-all with random email (if enabled)
+     * 2. If catch-all = true, don't check specific email (return early)
+     * 3. If catch-all = false, check specific email
      */
     private function checkSmtpWithDetails(string $email, string $domain): array
     {
@@ -1926,7 +1904,7 @@ class EmailVerificationService
         $mxRecords = $this->getMxRecords($domain);
         
         if (empty($mxRecords)) {
-            return ['valid' => false, 'mailbox_full' => false];
+            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
         }
 
         // Filter out skipped MX servers
@@ -1945,20 +1923,399 @@ class EmailVerificationService
         
         if (empty($mxRecordsToTry)) {
             Log::info('All MX servers are in skip list', ['domain' => $domain]);
-            return ['valid' => false, 'mailbox_full' => false];
+            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
         }
 
         // Try MX records concurrently (up to 3 to avoid long delays)
         $maxMxToTry = 3;
         $mxRecordsToTry = array_slice($mxRecordsToTry, 0, $maxMxToTry);
         
-        // Try concurrent connections first (faster)
-        $result = $this->performConcurrentSmtpCheck($mxRecordsToTry, $email);
-        if ($result !== null) {
-            return $result;
+        // Get first available MX server connection (concurrent)
+        $mxConnection = $this->getConcurrentMxConnection($mxRecordsToTry);
+        if ($mxConnection === null) {
+            // Fallback to sequential if concurrent failed
+            return $this->performSequentialSmtpCheck($mxRecordsToTry, $email);
         }
         
-        // Fallback to sequential if concurrent failed (backward compatibility)
+        // Use the connected MX server for SMTP check
+        $host = $mxConnection['host'];
+        $socket = $mxConnection['socket'];
+        
+        try {
+            // AfterShip method: First check catch-all (if enabled)
+            $catchAllEnabled = config('email-verification.enable_catch_all_detection', false);
+            $shouldSkipCatchAll = $this->shouldSkipCatchAllCheck($domain);
+            
+            // Default: assume catch-all = true (like AfterShip)
+            $isCatchAll = true;
+            
+            if ($catchAllEnabled && !$shouldSkipCatchAll) {
+                // Check if domain is public provider (they are always catch-all, skip test)
+                $publicProvider = $this->isPublicProvider($domain, $mxRecords);
+                
+                if (!$publicProvider) {
+                    // Test catch-all with random email (AfterShip method)
+                    // First, do SMTP handshake (greeting, EHLO, MAIL FROM)
+                    $handshakeResult = $this->performSmtpHandshake($socket, $host);
+                    if (!$handshakeResult['success']) {
+                        // Handshake failed, add to skip list if auto-add enabled, then close socket and return
+                        $this->addMxToSkipList($host, 'SMTP handshake failed');
+                        @fwrite($socket, "QUIT\r\n");
+                        @fclose($socket);
+                        return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
+                    }
+                    
+                    // Now test catch-all with random email
+                    $randomEmail = $this->generateRandomEmail($domain);
+                    $catchAllResult = $this->performRcptToOnly($socket, $host, $randomEmail);
+                    
+                    // If random email is rejected (550 5.1.1), it's NOT catch-all
+                    // If random email is accepted, it IS catch-all
+                    if ($catchAllResult['rejected'] && $catchAllResult['code'] === 550) {
+                        $isCatchAll = false; // Server rejected random email = not catch-all
+                    } else {
+                        $isCatchAll = true; // Server accepted random email = catch-all
+                    }
+                    
+                    Log::debug('Catch-all check result', [
+                        'domain' => $domain,
+                        'random_email' => $randomEmail,
+                        'is_catch_all' => $isCatchAll,
+                        'response_code' => $catchAllResult['code'] ?? null,
+                    ]);
+                } else {
+                    // Public provider = always catch-all, but we skip the test
+                    $isCatchAll = true;
+                }
+            }
+            
+            // If catch-all = true, don't check specific email (AfterShip optimization)
+            if ($isCatchAll) {
+                @fwrite($socket, "QUIT\r\n");
+                @fclose($socket);
+                
+                return [
+                    'valid' => false, // Can't verify if specific email exists
+                    'mailbox_full' => false,
+                    'catch_all' => true,
+                ];
+            }
+            
+            // Catch-all = false, so check specific email
+            // Socket already has handshake done, just do RCPT TO
+            $result = $this->performRcptToOnly($socket, $host, $email);
+            
+            @fwrite($socket, "QUIT\r\n");
+            @fclose($socket);
+            
+            return [
+                'valid' => $result['valid'] ?? false,
+                'mailbox_full' => $result['mailbox_full'] ?? false,
+                'catch_all' => false,
+            ];
+            
+        } catch (\Exception $e) {
+            @fclose($socket);
+            Log::warning('SMTP check failed', [
+                'email' => $email,
+                'domain' => $domain,
+                'error' => $e->getMessage(),
+            ]);
+            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
+        }
+    }
+    
+    /**
+     * Get concurrent MX connection (AfterShip method)
+     * Attempts to connect to all MX servers simultaneously and returns first successful connection
+     * 
+     * Note: If mx_skip_auto_add is enabled, failed connections are NOT added to skip list here,
+     * because we want to try all MX servers first. Skip list is only updated after handshake fails
+     * or in sequential fallback.
+     * 
+     * @param array $mxRecords Array of MX records to try (already filtered by skip list)
+     * @return array|null Array with 'host' and 'socket' keys, or null if all failed
+     */
+    private function getConcurrentMxConnection(array $mxRecords): ?array
+    {
+        if (empty($mxRecords)) {
+            return null;
+        }
+        
+        $connectTimeout = $this->getSmtpConnectTimeout();
+        
+        // Try to connect to all MX servers with quick timeout, use first that succeeds
+        // Note: PHP doesn't have true concurrency like Go, but we can try connections quickly
+        // Note: We don't add to skip list here if connection fails, because:
+        // 1. Connection failure might be temporary (network issue, timeout too short)
+        // 2. Skip list is updated after handshake fails (more reliable indicator of problematic server)
+        // 3. Sequential fallback will handle skip list updates for persistent failures
+        foreach ($mxRecords as $mx) {
+            $host = $mx['host'];
+            
+            // Quick connection attempt
+            $socket = @fsockopen($host, 25, $errno, $errstr, $connectTimeout);
+            
+            if ($socket !== false) {
+                // Successfully connected - return this connection
+                return [
+                    'host' => $host,
+                    'socket' => $socket,
+                ];
+            }
+            // Connection failed, but don't add to skip list here (might be temporary)
+            // Skip list will be updated if handshake fails or in sequential fallback
+        }
+        
+        // All attempts failed - return null to use sequential fallback
+        // Sequential fallback will add to skip list if all retries fail
+        return null;
+    }
+    
+    /**
+     * Perform SMTP handshake (greeting, EHLO, MAIL FROM)
+     * This is done once per connection, then RCPT TO can be called multiple times
+     * 
+     * @param resource $socket Already connected SMTP socket
+     * @param string $host MX hostname (for logging)
+     * @return array Array with 'success' key
+     */
+    private function performSmtpHandshake($socket, string $host): array
+    {
+        $operationTimeout = $this->getSmtpOperationTimeout();
+        
+        // Set operation timeout
+        stream_set_timeout($socket, $operationTimeout, 0);
+        
+        // Helper to check timeout
+        $isTimeout = function() use ($socket) {
+            $info = stream_get_meta_data($socket);
+            return $info['timed_out'] ?? false;
+        };
+        
+        try {
+            // Read greeting with timeout check
+            $response = @fgets($socket, 515);
+            if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
+                return ['success' => false];
+            }
+            
+            // EHLO with configurable hostname
+            $heloHostname = $this->getSmtpHeloHostname();
+            @fwrite($socket, "EHLO {$heloHostname}\r\n");
+            $response = @fgets($socket, 515);
+            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
+                return ['success' => false];
+            }
+            
+            // Read all EHLO responses (multi-line) with timeout protection
+            $maxLines = 10;
+            $lineCount = 0;
+            while ($lineCount < $maxLines) {
+                $line = @fgets($socket, 515);
+                if ($isTimeout() || !$line || !str_starts_with($line, '250')) {
+                    break;
+                }
+                $lineCount++;
+            }
+            
+            // MAIL FROM
+            @fwrite($socket, "MAIL FROM: <noreply@".gethostname().">\r\n");
+            $response = @fgets($socket, 515);
+            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
+                return ['success' => false];
+            }
+            
+            return ['success' => true];
+            
+        } catch (\Exception $e) {
+            Log::warning('SMTP handshake failed', [
+                'host' => $host,
+                'error' => $e->getMessage(),
+            ]);
+            return ['success' => false];
+        }
+    }
+    
+    /**
+     * Perform RCPT TO only (assumes handshake already done)
+     * This is used for both catch-all check (random email) and specific email check
+     * 
+     * @param resource $socket Already connected SMTP socket with handshake done
+     * @param string $host MX hostname (for logging)
+     * @param string $email Email to check (can be random or specific)
+     * @return array Array with 'valid', 'mailbox_full', 'rejected', 'code' keys
+     */
+    private function performRcptToOnly($socket, string $host, string $email): array
+    {
+        $operationTimeout = $this->getSmtpOperationTimeout();
+        
+        // Set operation timeout
+        stream_set_timeout($socket, $operationTimeout, 0);
+        
+        // Helper to check timeout
+        $isTimeout = function() use ($socket) {
+            $info = stream_get_meta_data($socket);
+            return $info['timed_out'] ?? false;
+        };
+        
+        try {
+            // RCPT TO
+            @fwrite($socket, "RCPT TO: <{$email}>\r\n");
+            $response = @fgets($socket, 515);
+            
+            if (!$response || $isTimeout()) {
+                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
+            }
+            
+            // Analyze SMTP response
+            $responseAnalysis = $this->analyzeSmtpResponse($response);
+            
+            // Check for greylisting (4xx responses) - retry after delay
+            if ($responseAnalysis['is_greylisting'] && config('email-verification.enable_greylisting_retry', false)) {
+                $retryDelay = config('email-verification.greylisting_retry_delay', 2);
+                sleep($retryDelay);
+                
+                // Retry RCPT TO
+                @fwrite($socket, "RCPT TO: <{$email}>\r\n");
+                $retryResponse = @fgets($socket, 515);
+                
+                if ($retryResponse && !$isTimeout()) {
+                    $responseAnalysis = $this->analyzeSmtpResponse($retryResponse);
+                    $response = $retryResponse; // Update response for final check
+                }
+            }
+            
+            // Check if rejected (550 = mailbox not found)
+            $isRejected = $responseAnalysis['is_invalid'] && ($responseAnalysis['code'] === 550);
+            
+            return [
+                'valid' => $responseAnalysis['is_valid'],
+                'mailbox_full' => $responseAnalysis['is_mailbox_full'] ?? false,
+                'rejected' => $isRejected,
+                'code' => $responseAnalysis['code'] ?? null,
+            ];
+            
+        } catch (\Exception $e) {
+            Log::warning('RCPT TO check failed', [
+                'host' => $host,
+                'email' => $email,
+                'error' => $e->getMessage(),
+            ]);
+            return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
+        }
+    }
+    
+    /**
+     * Perform RCPT TO check on already connected socket (full handshake + RCPT TO)
+     * This is used for standalone checks (not part of catch-all flow)
+     * 
+     * @param resource $socket Already connected SMTP socket
+     * @param string $host MX hostname (for logging)
+     * @param string $email Email to check (can be random or specific)
+     * @return array Array with 'valid', 'mailbox_full', 'rejected', 'code' keys
+     */
+    private function performRcptToCheck($socket, string $host, string $email): array
+    {
+        $operationTimeout = $this->getSmtpOperationTimeout();
+        
+        // Set operation timeout
+        stream_set_timeout($socket, $operationTimeout, 0);
+        
+        // Helper to check timeout
+        $isTimeout = function() use ($socket) {
+            $info = stream_get_meta_data($socket);
+            return $info['timed_out'] ?? false;
+        };
+        
+        try {
+            // Read greeting with timeout check
+            $response = @fgets($socket, 515);
+            if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
+                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
+            }
+            
+            // EHLO with configurable hostname
+            $heloHostname = $this->getSmtpHeloHostname();
+            @fwrite($socket, "EHLO {$heloHostname}\r\n");
+            $response = @fgets($socket, 515);
+            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
+                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
+            }
+            
+            // Read all EHLO responses (multi-line) with timeout protection
+            $maxLines = 10;
+            $lineCount = 0;
+            while ($lineCount < $maxLines) {
+                $line = @fgets($socket, 515);
+                if ($isTimeout() || !$line || !str_starts_with($line, '250')) {
+                    break;
+                }
+                $lineCount++;
+            }
+            
+            // MAIL FROM
+            @fwrite($socket, "MAIL FROM: <noreply@".gethostname().">\r\n");
+            $response = @fgets($socket, 515);
+            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
+                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
+            }
+            
+            // RCPT TO
+            @fwrite($socket, "RCPT TO: <{$email}>\r\n");
+            $response = @fgets($socket, 515);
+            
+            if (!$response || $isTimeout()) {
+                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
+            }
+            
+            // Analyze SMTP response
+            $responseAnalysis = $this->analyzeSmtpResponse($response);
+            
+            // Check for greylisting (4xx responses) - retry after delay
+            if ($responseAnalysis['is_greylisting'] && config('email-verification.enable_greylisting_retry', false)) {
+                $retryDelay = config('email-verification.greylisting_retry_delay', 2);
+                sleep($retryDelay);
+                
+                // Retry RCPT TO
+                @fwrite($socket, "RCPT TO: <{$email}>\r\n");
+                $retryResponse = @fgets($socket, 515);
+                
+                if ($retryResponse && !$isTimeout()) {
+                    $responseAnalysis = $this->analyzeSmtpResponse($retryResponse);
+                    $response = $retryResponse; // Update response for final check
+                }
+            }
+            
+            // Check if rejected (550 = mailbox not found)
+            $isRejected = $responseAnalysis['is_invalid'] && ($responseAnalysis['code'] === 550);
+            
+            // Note: Don't close socket here - it will be closed by caller
+            // This allows reuse of the same connection for catch-all check and then specific email check
+            
+            return [
+                'valid' => $responseAnalysis['is_valid'],
+                'mailbox_full' => $responseAnalysis['is_mailbox_full'] ?? false,
+                'rejected' => $isRejected,
+                'code' => $responseAnalysis['code'] ?? null,
+            ];
+            
+        } catch (\Exception $e) {
+            Log::warning('RCPT TO check failed', [
+                'host' => $host,
+                'email' => $email,
+                'error' => $e->getMessage(),
+            ]);
+            return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
+        }
+    }
+    
+    /**
+     * Fallback: Perform sequential SMTP check (backward compatibility)
+     * Used when concurrent connection fails
+     */
+    private function performSequentialSmtpCheck(array $mxRecordsToTry, string $email): array
+    {
         $mailboxFull = false;
         
         foreach ($mxRecordsToTry as $mx) {
@@ -1969,7 +2326,7 @@ class EmailVerificationService
                 $result = $this->performSmtpCheckWithDetails($host, $email);
                 
                 if ($result['valid']) {
-                    return ['valid' => true, 'mailbox_full' => $result['mailbox_full'] ?? false];
+                    return ['valid' => true, 'mailbox_full' => $result['mailbox_full'] ?? false, 'catch_all' => false];
                 }
                 
                 // Track mailbox full status
@@ -1985,12 +2342,12 @@ class EmailVerificationService
                 
                 // Skip retry delay on last attempt to save time
                 if ($attempt < $retries - 1) {
-                    usleep(300000); // 0.3 second delay between retries (reduced from 0.5)
+                    usleep(300000); // 0.3 second delay between retries
                 }
             }
         }
 
-        return ['valid' => false, 'mailbox_full' => $mailboxFull];
+        return ['valid' => false, 'mailbox_full' => $mailboxFull, 'catch_all' => false];
     }
 
     /**
@@ -2112,7 +2469,7 @@ class EmailVerificationService
             // Read greeting with timeout check
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
-                return ['valid' => false, 'mailbox_full' => false];
+                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
             }
             
             // EHLO with configurable hostname
@@ -2120,7 +2477,7 @@ class EmailVerificationService
             @fwrite($socket, "EHLO {$heloHostname}\r\n");
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                return ['valid' => false, 'mailbox_full' => false];
+                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
             }
             
             // Read all EHLO responses (multi-line) with timeout protection
@@ -2138,7 +2495,7 @@ class EmailVerificationService
             @fwrite($socket, "MAIL FROM: <noreply@".gethostname().">\r\n");
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                return ['valid' => false, 'mailbox_full' => false];
+                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
             }
             
             // RCPT TO
@@ -2148,7 +2505,7 @@ class EmailVerificationService
             if (!$response || $isTimeout()) {
                 @fwrite($socket, "QUIT\r\n");
                 @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false];
+                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
             }
             
             // Analyze SMTP response
@@ -2177,11 +2534,12 @@ class EmailVerificationService
             return [
                 'valid' => $responseAnalysis['is_valid'],
                 'mailbox_full' => $responseAnalysis['is_mailbox_full'] ?? false,
+                'catch_all' => false, // This method doesn't do catch-all detection
             ];
             
         } catch (\Exception $e) {
             @fclose($socket);
-            return ['valid' => false, 'mailbox_full' => false];
+            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
         }
     }
 
@@ -2196,7 +2554,7 @@ class EmailVerificationService
         if (!$socket) {
             // Connection failed, add to skip list if auto-add enabled
             $this->addMxToSkipList($host, 'SMTP connection failed');
-            return ['valid' => false, 'mailbox_full' => false];
+            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
         }
 
         try {
@@ -2213,7 +2571,7 @@ class EmailVerificationService
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
                 @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false];
+                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
             }
 
             // EHLO with configurable hostname
@@ -2222,7 +2580,7 @@ class EmailVerificationService
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
                 @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false];
+                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
             }
 
             // Read all EHLO responses (multi-line) with timeout protection
@@ -2241,7 +2599,7 @@ class EmailVerificationService
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
                 @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false];
+                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
             }
 
             // RCPT TO
@@ -2292,7 +2650,7 @@ class EmailVerificationService
                         
                         @fwrite($socket, "QUIT\r\n");
                         @fclose($socket);
-                        return ['valid' => false, 'mailbox_full' => false];
+                        return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
                     }
                 }
             }
@@ -2305,11 +2663,12 @@ class EmailVerificationService
             return [
                 'valid' => $responseAnalysis['is_valid'],
                 'mailbox_full' => $responseAnalysis['is_mailbox_full'] ?? false,
+                'catch_all' => false, // Sequential check doesn't do catch-all detection
             ];
 
         } catch (\Exception $e) {
             @fclose($socket);
-            return false;
+            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
         }
     }
 
