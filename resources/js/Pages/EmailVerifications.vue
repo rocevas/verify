@@ -264,11 +264,13 @@ onMounted(() => {
                                             <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                                                 <tr v-for="item in historyData" :key="item.id">
                                                     <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-gray-100">
-                                                        {{ item.email }}
+                                                        <a :href="`/verifications/email/${item.id}`" class="text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-300">
+                                                            {{ item.email }}
+                                                        </a>
                                                     </td>
                                                     <td class="px-6 py-4 whitespace-nowrap">
-                                                        <span :class="['px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full', getStatusColor(item.status)]">
-                                                            {{ getStatusBadge(item.status) }}
+                                                        <span :class="['px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full', getStatusColor(item.state || item.result || item.status)]">
+                                                            {{ getStatusBadge(item.state || item.result || item.status) }}
                                                         </span>
                                                     </td>
                                                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">

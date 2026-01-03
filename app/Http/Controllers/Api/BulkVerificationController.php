@@ -59,12 +59,12 @@ class BulkVerificationController extends Controller
 
         return response()->json([
             'message' => 'File uploaded and processing started',
-            'job_id' => $job->id,
+            'job_id' => $job->uuid,
             'total_emails' => $totalEmails,
         ], 202);
     }
 
-    public function status(int $id, Request $request): JsonResponse
+    public function status(BulkVerificationJob $bulkJob, Request $request): JsonResponse
     {
         $user = $request->user();
         $team = $user->currentTeam;
@@ -74,12 +74,13 @@ class BulkVerificationController extends Controller
             return response()->json(['error' => 'No team selected'], 403);
         }
 
-        $job = BulkVerificationJob::where('id', $id)
+        // Verify the bulk job belongs to the team
+        $job = BulkVerificationJob::where('uuid', $bulkJob->uuid)
             ->where('team_id', $teamId)
             ->firstOrFail();
 
         return response()->json([
-            'id' => $job->id,
+            'id' => $job->uuid,
             'status' => $job->status,
             'total_emails' => $job->total_emails,
             'processed_emails' => $job->processed_emails,
@@ -92,7 +93,7 @@ class BulkVerificationController extends Controller
         ]);
     }
 
-    public function download(int $id, Request $request)
+    public function download(BulkVerificationJob $bulkJob, Request $request)
     {
         $user = $request->user();
         $team = $user->currentTeam;
@@ -102,7 +103,8 @@ class BulkVerificationController extends Controller
             return response()->json(['error' => 'No team selected'], 403);
         }
 
-        $job = BulkVerificationJob::where('id', $id)
+        // Verify the bulk job belongs to the team
+        $job = BulkVerificationJob::where('uuid', $bulkJob->uuid)
             ->where('team_id', $teamId)
             ->firstOrFail();
 
@@ -110,7 +112,7 @@ class BulkVerificationController extends Controller
             return response()->json(['error' => 'Job not completed or result not available'], 404);
         }
 
-        return Storage::disk('local')->download($job->result_file_path, "verification_results_{$job->id}.csv");
+        return Storage::disk('local')->download($job->result_file_path, "verification_results_{$job->uuid}.csv");
     }
 
     public function list(Request $request): JsonResponse
@@ -127,6 +129,30 @@ class BulkVerificationController extends Controller
             ->orderBy('created_at', 'desc')
             ->paginate(20);
 
-        return response()->json($jobs);
+        // Transform to use UUID instead of ID
+        $data = $jobs->getCollection()->map(function ($job) {
+            return [
+                'id' => $job->uuid,
+                'filename' => $job->filename,
+                'source' => $job->source,
+                'status' => $job->status,
+                'total_emails' => $job->total_emails,
+                'processed_emails' => $job->processed_emails,
+                'progress_percentage' => round($job->progress_percentage, 2),
+                'valid_count' => $job->valid_count,
+                'invalid_count' => $job->invalid_count,
+                'risky_count' => $job->risky_count,
+                'created_at' => $job->created_at,
+                'completed_at' => $job->completed_at,
+            ];
+        });
+
+        return response()->json([
+            'data' => $data,
+            'current_page' => $jobs->currentPage(),
+            'last_page' => $jobs->lastPage(),
+            'per_page' => $jobs->perPage(),
+            'total' => $jobs->total(),
+        ]);
     }
 }

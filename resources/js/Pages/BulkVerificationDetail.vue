@@ -5,7 +5,7 @@ import AppLayout from '@/Layouts/AppLayout.vue';
 import PrimaryButton from '@/Components/PrimaryButton.vue';
 
 const props = defineProps({
-    bulkJobId: Number,
+    bulkJobId: String, // UUID, not Number
     title: String,
 });
 
@@ -62,27 +62,49 @@ const loadBulkJob = async () => {
 const loadEmails = async (page = 1) => {
     loading.value = true;
     try {
+        console.log('Loading emails for bulkJobId:', props.bulkJobId);
         const response = await axios.get(`/api/bulk-jobs/${props.bulkJobId}/emails`, {
             params: { page, per_page: 50 },
             withCredentials: true,
         });
+        console.log('Emails response:', response.data);
+        console.log('Response data.data:', response.data.data);
+        console.log('Response data.pagination:', response.data.pagination);
         emailsData.value = response.data.data || [];
         emailsPagination.value = response.data.pagination || {};
+        console.log('emailsData.value after assignment:', emailsData.value);
+        console.log('emailsData.value.length:', emailsData.value.length);
     } catch (error) {
         console.error('Failed to load emails:', error);
+        console.error('Error response:', error.response?.data);
+        console.error('Error status:', error.response?.status);
+        console.error('Error message:', error.message);
+        // Show error message to user
+        if (error.response?.status === 404) {
+            console.error('Bulk job not found. UUID:', props.bulkJobId);
+        }
+        // Set empty array on error to stop spinner
+        emailsData.value = [];
+        emailsPagination.value = {};
     } finally {
         loading.value = false;
+        console.log('loadEmails finished, loading.value:', loading.value);
     }
 };
 
 const getStatusColor = (status) => {
     const colors = {
+        // State values
+        deliverable: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
+        undeliverable: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        risky: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+        unknown: 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200',
+        error: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        // Result values (for backward compatibility)
         valid: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
         invalid: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
-        risky: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
         catch_all: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
         do_not_mail: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
-        unknown: 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200',
     };
     return colors[status] || colors.unknown;
 };
@@ -305,8 +327,8 @@ onUnmounted(() => {
                                                             {{ email.email }}
                                                         </td>
                                                         <td class="px-6 py-4 whitespace-nowrap">
-                                                            <span :class="['px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full', getStatusColor(email.status)]">
-                                                                {{ getStatusBadge(email.status) }}
+                                                            <span :class="['px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full', getStatusColor(email.state || email.result)]">
+                                                                {{ getStatusBadge(email.state || email.result) }}
                                                             </span>
                                                         </td>
                                                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">

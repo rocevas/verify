@@ -122,37 +122,35 @@ class AiEmailVerificationService
 
         // Stream individual check results
         if ($streamCallback) {
-            $checks = $traditionalResult['checks'] ?? [];
-            
             $streamCallback([
                 'type' => 'step',
-                'message' => $checks['syntax'] ? '✅ Syntax check: Valid format' : '❌ Syntax check: Invalid format',
+                'message' => ($traditionalResult['syntax'] ?? false) ? '✅ Syntax check: Valid format' : '❌ Syntax check: Invalid format',
                 'step' => 'syntax_check',
             ]);
             
             if ($parts) {
                 $streamCallback([
                     'type' => 'step',
-                    'message' => $checks['disposable'] ? '⚠️ Disposable email detected' : '✅ Not a disposable email',
+                    'message' => ($traditionalResult['disposable'] ?? false) ? '⚠️ Disposable email detected' : '✅ Not a disposable email',
                     'step' => 'disposable_check',
                 ]);
                 
                 $streamCallback([
                     'type' => 'step',
-                    'message' => $checks['role'] ? '⚠️ Role-based email (info@, support@, etc.)' : '✅ Not a role-based email',
+                    'message' => ($traditionalResult['role'] ?? false) ? '⚠️ Role-based email (info@, support@, etc.)' : '✅ Not a role-based email',
                     'step' => 'role_check',
                 ]);
                 
                 $streamCallback([
                     'type' => 'step',
-                    'message' => $checks['mx'] ? '✅ MX records found' : '❌ No MX records found',
+                    'message' => ($traditionalResult['mx_record'] ?? false) ? '✅ MX records found' : '❌ No MX records found',
                     'step' => 'mx_check',
                 ]);
                 
-                if ($checks['mx']) {
+                if ($traditionalResult['mx_record'] ?? false) {
                     $streamCallback([
                         'type' => 'step',
-                        'message' => $checks['smtp'] ? '✅ SMTP check: Email exists' : '⏳ SMTP check: Could not verify (may be catch-all)',
+                        'message' => ($traditionalResult['smtp'] ?? false) ? '✅ SMTP check: Email exists' : '⏳ SMTP check: Could not verify (may be catch-all)',
                         'step' => 'smtp_check',
                     ]);
                 }
@@ -161,7 +159,7 @@ class AiEmailVerificationService
 
         // Merge traditional results
         $result = array_merge($result, $traditionalResult);
-        $result['checks']['ai_analysis'] = false;
+        $result['ai_analysis'] = false;
 
         // Stream: Traditional checks complete
         if ($streamCallback) {
@@ -170,9 +168,9 @@ class AiEmailVerificationService
                 'message' => 'Traditional checks completed',
                 'step' => 'traditional_complete',
                 'data' => [
-                    'syntax' => $result['checks']['syntax'],
-                    'mx' => $result['checks']['mx'],
-                    'smtp' => $result['checks']['smtp'],
+                    'syntax' => $result['syntax'] ?? false,
+                    'mx' => $result['mx_record'] ?? false,
+                    'smtp' => $result['smtp'] ?? false,
                     'score' => $result['score'],
                 ],
             ]);
@@ -207,7 +205,7 @@ class AiEmailVerificationService
                     $riskFactors = $aiResult['risk_factors'] ?? [];
                     if (!empty($riskFactors)) {
                         // Mark specific risk factors in checks
-                        if (in_array('typo_domain', $riskFactors) && !$result['checks']['typo_domain']) {
+                        if (in_array('typo_domain', $riskFactors) && !($result['typo_domain'] ?? false)) {
                             $result['checks']['ai_detected_typo'] = true;
                             
                             // If AI detected typo and provided correction, use it
@@ -231,7 +229,7 @@ class AiEmailVerificationService
                     }
                     
                     // If traditional service already detected typo and has correction, use it
-                    if ($result['checks']['typo_domain'] ?? false && !isset($result['did_you_mean'])) {
+                    if ($result['typo_domain'] ?? false && !isset($result['did_you_mean'])) {
                         // Correction should already be in result from traditional service
                         // But if not, try to get it
                         $parts = explode('@', $email, 2);
@@ -260,12 +258,12 @@ class AiEmailVerificationService
                         $isInvalidTld = str_ends_with($domain, '.invalid');
                         
                         // Check if disposable email
-                        $isDisposable = $result['checks']['disposable'] ?? false;
+                        $isDisposable = $result['disposable'] ?? false;
                         $disposableServiceDomains = ['guerrillamail.com', '10minutemail.com', 'mailinator.com', 'tempmail.com', 'throwaway.email', 'getnada.com', 'mohmal.com', 'trashmail.com'];
                         $isDisposableService = in_array($domain, $disposableServiceDomains, true);
                         
                         // For public providers with MX records, ensure high score
-                        if ($isPublicProvider && $result['checks']['mx']) {
+                        if ($isPublicProvider && ($result['mx_record'] ?? false)) {
                             // Public provider with MX records should have high score (90-100)
                             // Use AI confidence if it's high, otherwise use traditional score or minimum 90
                             $result['score'] = max(90, max($result['score'], $aiResult['confidence']));
@@ -309,7 +307,7 @@ class AiEmailVerificationService
                         $isInvalidTld = str_ends_with($domain, '.invalid');
                         
                         // Check if disposable email
-                        $isDisposable = $result['checks']['disposable'] ?? false;
+                        $isDisposable = $result['disposable'] ?? false;
                         $disposableServiceDomains = ['guerrillamail.com', '10minutemail.com', 'mailinator.com', 'tempmail.com', 'throwaway.email', 'getnada.com', 'mohmal.com', 'trashmail.com'];
                         $isDisposableService = in_array($domain, $disposableServiceDomains, true);
                         
@@ -323,7 +321,7 @@ class AiEmailVerificationService
                                 'ai_suggested' => $aiResult['suggested_status'],
                                 'reason' => 'Public provider email already marked as valid',
                             ]);
-                        } elseif ($isPublicProvider && $aiResult['suggested_status'] === 'valid' && $result['checks']['mx']) {
+                        } elseif ($isPublicProvider && $aiResult['suggested_status'] === 'valid' && ($result['mx_record'] ?? false)) {
                             // If public provider has MX records and AI suggests valid, always use valid
                             $result['status'] = 'valid';
                             Log::info('AI status override for public provider with MX', [
@@ -396,7 +394,7 @@ class AiEmailVerificationService
                             }
                         } elseif ($currentStatus === 'unknown') {
                             // Always use AI suggestion if status is unknown (unless it's a public provider that should be valid)
-                            if ($isPublicProvider && $result['checks']['mx'] && $aiResult['suggested_status'] !== 'valid') {
+                            if ($isPublicProvider && ($result['mx_record'] ?? false) && $aiResult['suggested_status'] !== 'valid') {
                                 // Public provider with MX records should be valid, not what AI suggests
                                 $result['status'] = 'valid';
                                 Log::info('AI status override blocked - public provider with MX should be valid', [
@@ -454,6 +452,14 @@ class AiEmailVerificationService
         // Calculate duration
         $endTime = microtime(true);
         $result['duration'] = round(($endTime - $startTime) * 1000, 2); // Duration in milliseconds
+        
+        // Determine state and result (traditional service should have set it, but ensure it's set)
+        if (!isset($result['state']) || !isset($result['result'])) {
+            // Use reflection to call traditional service's method, or implement same logic
+            $stateAndResult = $this->determineStateAndResult($result);
+            $result['state'] = $stateAndResult['state'];
+            $result['result'] = $stateAndResult['result'];
+        }
         
         // Save verification with AI data (traditional service already saved it, so we update)
         $this->updateVerificationWithAi($email, $result, $userId, $teamId);
@@ -668,13 +674,13 @@ class AiEmailVerificationService
         $isInvalidTld = str_ends_with(strtolower($domain), '.invalid');
         
         // Check if disposable email
-        $isDisposable = $traditionalResult['checks']['disposable'] ?? false;
+        $isDisposable = $traditionalResult['disposable'] ?? false;
         
         // Check for known disposable email service domains
         $disposableServiceDomains = ['guerrillamail.com', '10minutemail.com', 'mailinator.com', 'tempmail.com', 'throwaway.email', 'getnada.com', 'mohmal.com', 'trashmail.com'];
         $isDisposableService = in_array(strtolower($domain), $disposableServiceDomains, true);
 
-        $smtpStatus = $traditionalResult['checks']['smtp'] 
+        $smtpStatus = $traditionalResult['smtp'] ?? false
             ? 'PASS' 
             : ($traditionalResult['status'] === 'valid' && $traditionalResult['score'] >= 90 
                 ? 'SKIPPED (public provider - known valid)' 
@@ -683,7 +689,7 @@ class AiEmailVerificationService
         // Build context notes only for relevant cases
         $contextNotes = [];
         if ($isPublicProvider) {
-            $mxStatus = $traditionalResult['checks']['mx'] ? 'FOUND' : 'NOT FOUND';
+            $mxStatus = ($traditionalResult['mx_record'] ?? false) ? 'FOUND' : 'NOT FOUND';
             $contextNotes[] = "🚨 CRITICAL: This domain ({$domain}) is a PUBLIC EMAIL PROVIDER (Gmail, Yahoo, Outlook, etc.). These are MAJOR email providers that are ALWAYS VALID when MX records exist. Public providers ALWAYS have MX records - if MX records are FOUND, this email is VALID with 90-100% confidence. Public providers BLOCK SMTP verification for security, but this does NOT mean the email is invalid. If MX records are FOUND for a public provider, you MUST use 90-100% confidence and 'valid' status. DO NOT mark public provider emails as 'do_not_mail' or give low confidence - they are highly deliverable.";
         }
         if ($isTypoDomain) {
@@ -717,11 +723,11 @@ Email structure:
 - Domain (after @): {$domain}{$contextSection}
 
 Traditional verification results:
-- Syntax check: " . ($traditionalResult['checks']['syntax'] ? 'PASS (email format is valid)' : 'FAIL (email format is invalid)') . "
-- MX records: " . ($traditionalResult['checks']['mx'] ? 'FOUND' : 'NOT FOUND') . "
+- Syntax check: " . (($traditionalResult['syntax'] ?? false) ? 'PASS (email format is valid)' : 'FAIL (email format is invalid)') . "
+- MX records: " . (($traditionalResult['mx_record'] ?? false) ? 'FOUND' : 'NOT FOUND') . "
 - SMTP check: {$smtpStatus}
-- Disposable email: " . ($traditionalResult['checks']['disposable'] ? 'YES' : 'NO') . "
-- Role-based email: " . ($traditionalResult['checks']['role'] ? 'YES' : 'NO') . "
+- Disposable email: " . (($traditionalResult['disposable'] ?? false) ? 'YES' : 'NO') . "
+- Role-based email: " . (($traditionalResult['role'] ?? false) ? 'YES' : 'NO') . "
 - Current status: {$traditionalResult['status']}
 - Current score: {$traditionalResult['score']}/100
 
@@ -825,6 +831,145 @@ Focus on:
     }
 
     /**
+     * Determine state and result based on checks and current status
+     * Same logic as EmailVerificationService
+     */
+    private function determineStateAndResult(array $result): array
+    {
+        $currentStatus = $result['status'] ?? 'unknown';
+        $error = $result['error'] ?? null;
+        
+        // Check for syntax error first (highest priority)
+        if (!($result['syntax'] ?? false)) {
+            return [
+                'state' => 'undeliverable',
+                'result' => 'syntax_error',
+            ];
+        }
+        
+        // Check for typo domain
+        if ($result['typo_domain'] ?? false) {
+            return [
+                'state' => 'undeliverable',
+                'result' => 'typo',
+            ];
+        }
+        
+        // Check for disposable email
+        if ($result['disposable'] ?? false) {
+            return [
+                'state' => 'undeliverable',
+                'result' => 'disposable',
+            ];
+        }
+        
+        // Check for blacklist/blocked
+        if ($result['blacklist'] ?? false || $currentStatus === 'spamtrap' || $currentStatus === 'abuse' || $currentStatus === 'do_not_mail') {
+            return [
+                'state' => 'undeliverable',
+                'result' => 'blocked',
+            ];
+        }
+        
+        // Check for mailbox full
+        if ($result['mailbox_full'] ?? false) {
+            return [
+                'state' => 'risky',
+                'result' => 'mailbox_full',
+            ];
+        }
+        
+        // Check for role-based email
+        if ($result['role'] ?? false) {
+            return [
+                'state' => 'risky',
+                'result' => 'role',
+            ];
+        }
+        
+        // Check for catch-all
+        if ($currentStatus === 'catch_all') {
+            return [
+                'state' => 'risky',
+                'result' => 'catch_all',
+            ];
+        }
+        
+        // Check for valid email (SMTP verified or high confidence)
+        if ($result['smtp'] ?? false) {
+            return [
+                'state' => 'deliverable',
+                'result' => 'valid',
+            ];
+        }
+        
+        // If MX records exist and domain is valid, but SMTP not checked (public providers)
+        if (($result['mx_record'] ?? false) && ($result['domain_validity'] ?? false) && $currentStatus === 'valid') {
+            return [
+                'state' => 'deliverable',
+                'result' => 'valid',
+            ];
+        }
+        
+        // Check for invalid domain or no MX records
+        if (!($result['mx_record'] ?? false) || !($result['domain_validity'] ?? false)) {
+            if ($currentStatus === 'invalid') {
+                return [
+                    'state' => 'undeliverable',
+                    'result' => 'mailbox_not_found',
+                ];
+            }
+        }
+        
+        // Check for connection/timeout errors
+        if ($error && (
+            str_contains(strtolower($error), 'timeout') ||
+            str_contains(strtolower($error), 'connection') ||
+            str_contains(strtolower($error), 'unavailable') ||
+            str_contains(strtolower($error), 'could not connect')
+        )) {
+            return [
+                'state' => 'unknown',
+                'result' => null,
+            ];
+        }
+        
+        // Check for unexpected errors
+        if ($error && $currentStatus === 'unknown') {
+            return [
+                'state' => 'error',
+                'result' => 'error',
+            ];
+        }
+        
+        // Default: unknown
+        if ($currentStatus === 'unknown') {
+            return [
+                'state' => 'unknown',
+                'result' => null,
+            ];
+        }
+        
+        // Fallback: map old status to new format
+        return [
+            'state' => match($currentStatus) {
+                'valid' => 'deliverable',
+                'invalid', 'spamtrap', 'abuse', 'do_not_mail' => 'undeliverable',
+                'risky', 'catch_all' => 'risky',
+                default => 'unknown',
+            },
+            'result' => match($currentStatus) {
+                'valid' => 'valid',
+                'invalid' => 'mailbox_not_found',
+                'spamtrap', 'abuse', 'do_not_mail' => 'blocked',
+                'risky' => 'catch_all',
+                'catch_all' => 'catch_all',
+                default => null,
+            },
+        ];
+    }
+    
+    /**
      * Get typo correction for a domain
      * Uses the traditional service's typo correction logic
      */
@@ -890,23 +1035,29 @@ Focus on:
                 ->first();
 
             if ($verification) {
-                $checks = $verification->checks ?? [];
-                $checks['ai_analysis'] = $result['checks']['ai_analysis'] ?? false;
-
-                // Store AI insights in checks JSON (we can add a separate column later if needed)
                 $updateData = [
-                    'checks' => $checks,
                     'score' => $result['score'],
-                    'status' => $result['status'],
+                    'state' => $result['state'] ?? 'unknown',
+                    'result' => $result['result'] ?? null,
+                    'ai_analysis' => $result['ai_analysis'] ?? false,
+                    'ai_insights' => $result['ai_insights'] ?? null,
+                    'ai_confidence' => $result['ai_confidence'] ?? null,
+                    'ai_risk_factors' => $result['ai_risk_factors'] ?? null,
+                    'did_you_mean' => $result['did_you_mean'] ?? null,
+                    'syntax' => $result['syntax'] ?? false,
+                    'mx_record' => $result['mx_record'] ?? false,
+                    'smtp' => $result['smtp'] ?? false,
+                    'disposable' => $result['disposable'] ?? false,
+                    'role' => $result['role'] ?? false,
+                    'no_reply' => $result['no_reply'] ?? false,
+                    'typo_domain' => $result['typo_domain'] ?? false,
+                    'mailbox_full' => $result['mailbox_full'] ?? false,
+                    'is_free' => $result['is_free'] ?? $result['free'] ?? false,
+                    'blacklist' => $result['blacklist'] ?? false,
+                    'domain_validity' => $result['domain_validity'] ?? false,
+                    'isp_esp' => $result['isp_esp'] ?? false,
+                    'government_tld' => $result['government_tld'] ?? false,
                 ];
-
-                // Store AI insights in checks for now (can be extracted later)
-                if ($result['ai_insights'] || $result['ai_confidence'] !== null || !empty($result['ai_risk_factors'] ?? [])) {
-                    $checks['ai_insights'] = $result['ai_insights'];
-                    $checks['ai_confidence'] = $result['ai_confidence'];
-                    $checks['ai_risk_factors'] = $result['ai_risk_factors'] ?? [];
-                    $updateData['checks'] = $checks;
-                }
 
                 $verification->update($updateData);
             }

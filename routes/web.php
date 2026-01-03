@@ -23,10 +23,10 @@ Route::middleware([
     'verified',
 ])->group(function () {
     // New AI Dashboard (ChatGPT-like)
-    Route::get('/dashboard', function () {
+    Route::get('/chat', function () {
         return Inertia::render('Dashboard');
     })->name('dashboard');
-    
+
     Route::get('/dashboard-old', function () {
         return Inertia::render('DashboardOld');
     })->name('dashboard-old');
@@ -42,13 +42,13 @@ Route::middleware([
     })->name('verifications.import');
 
     // Bulk Verification Detail page
-    Route::get('/verifications/bulk/{id}', function (int $id) {
-        return Inertia::render('BulkVerificationDetail', ['bulkJobId' => $id]);
+    Route::get('/verifications/bulk/{bulkJob:uuid}', function (\App\Models\BulkVerificationJob $bulkJob) {
+        return Inertia::render('BulkVerificationDetail', ['bulkJobId' => $bulkJob->uuid]);
     })->name('verifications.bulk');
 
     // Individual Email Verification Detail page
-    Route::get('/verifications/email/{id}', function (int $id) {
-        return Inertia::render('EmailVerificationDetail', ['verificationId' => $id]);
+    Route::get('/verifications/email/{verification:uuid}', function (\App\Models\EmailVerification $verification) {
+        return Inertia::render('EmailVerificationDetail', ['verificationId' => $verification->uuid]);
     })->name('verifications.email');
 
     // Monitors page
@@ -75,14 +75,14 @@ Route::middleware([
         Route::get('/stats', [\App\Http\Controllers\DashboardController::class, 'stats']);
         Route::get('/chart', [\App\Http\Controllers\DashboardController::class, 'chart']);
         Route::get('/recent', [\App\Http\Controllers\DashboardController::class, 'recent']);
-        Route::get('/bulk-jobs/{bulkJob}/emails', [\App\Http\Controllers\DashboardController::class, 'bulkJobEmails']);
-        Route::get('/verifications/{verification}', [\App\Http\Controllers\DashboardController::class, 'verificationDetail']);
+        Route::get('/bulk-jobs/{bulkJob:uuid}/emails', [\App\Http\Controllers\DashboardController::class, 'bulkJobEmails']);
+        Route::get('/verifications/{verification:uuid}', [\App\Http\Controllers\DashboardController::class, 'verificationDetail']);
     });
 
     // Bulk Verification Detail API routes
     Route::prefix('api/bulk-jobs')->group(function () {
-        Route::get('/{bulkJob}', [\App\Http\Controllers\DashboardController::class, 'bulkJobDetail']);
-        Route::get('/{bulkJob}/emails', [\App\Http\Controllers\DashboardController::class, 'bulkJobEmailsPaginated']);
+        Route::get('/{bulkJob:uuid}', [\App\Http\Controllers\DashboardController::class, 'bulkJobDetail']);
+        Route::get('/{bulkJob:uuid}/emails', [\App\Http\Controllers\DashboardController::class, 'bulkJobEmailsPaginated']);
     });
 
     // Email Verifications API routes
@@ -110,8 +110,8 @@ Route::middleware([
     Route::prefix('api/bulk')->group(function () {
         Route::post('/upload', [\App\Http\Controllers\Api\BulkVerificationController::class, 'upload']);
         Route::get('/jobs', [\App\Http\Controllers\Api\BulkVerificationController::class, 'list']);
-        Route::get('/jobs/{id}', [\App\Http\Controllers\Api\BulkVerificationController::class, 'status']);
-        Route::get('/jobs/{id}/download', [\App\Http\Controllers\Api\BulkVerificationController::class, 'download']);
+        Route::get('/jobs/{bulkJob:uuid}', [\App\Http\Controllers\Api\BulkVerificationController::class, 'status']);
+        Route::get('/jobs/{bulkJob:uuid}/download', [\App\Http\Controllers\Api\BulkVerificationController::class, 'download']);
     });
 
     // Monitor routes (for UI)

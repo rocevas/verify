@@ -40,17 +40,17 @@ class CheckBulkVerificationCompletionJob implements ShouldQueue
         $processedCount = EmailVerification::where('bulk_verification_job_id', $this->bulkJobId)
             ->count();
 
-        // Count statuses
+        // Count statuses using 'state' field (not 'status')
         $validCount = EmailVerification::where('bulk_verification_job_id', $this->bulkJobId)
-            ->where('status', 'valid')
+            ->where('state', 'deliverable')
             ->count();
         
         $invalidCount = EmailVerification::where('bulk_verification_job_id', $this->bulkJobId)
-            ->where('status', 'invalid')
+            ->where('state', 'undeliverable')
             ->count();
         
         $riskyCount = EmailVerification::where('bulk_verification_job_id', $this->bulkJobId)
-            ->whereIn('status', ['catch_all', 'risky', 'do_not_mail'])
+            ->where('state', 'risky')
             ->count();
 
         // Update progress
@@ -89,20 +89,20 @@ class CheckBulkVerificationCompletionJob implements ShouldQueue
         $resultHandle = fopen(Storage::disk('local')->path($resultPath), 'w');
         
         // Write header
-        fputcsv($resultHandle, ['Email', 'Status', 'Score', 'Syntax', 'MX', 'SMTP', 'Disposable', 'Role']);
+        fputcsv($resultHandle, ['Email', 'State', 'Result', 'Score', 'Syntax', 'MX', 'SMTP', 'Disposable', 'Role']);
         
         // Write results
         foreach ($verifications as $verification) {
-            $checks = $verification->checks ?? [];
             fputcsv($resultHandle, [
                 $verification->email,
-                $verification->status,
+                $verification->state, // Use 'state' instead of 'status'
+                $verification->result, // Use 'result' for more detailed status
                 $verification->score ?? 0,
-                ($checks['syntax'] ?? false) ? 'Yes' : 'No',
-                ($checks['mx'] ?? false) ? 'Yes' : 'No',
-                ($checks['smtp'] ?? false) ? 'Yes' : 'No',
-                ($checks['disposable'] ?? false) ? 'Yes' : 'No',
-                ($checks['role'] ?? false) ? 'Yes' : 'No',
+                $verification->syntax ? 'Yes' : 'No',
+                $verification->mx_record ? 'Yes' : 'No',
+                $verification->smtp ? 'Yes' : 'No',
+                $verification->disposable ? 'Yes' : 'No',
+                $verification->role ? 'Yes' : 'No',
             ]);
         }
         

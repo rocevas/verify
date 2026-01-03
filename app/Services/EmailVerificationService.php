@@ -773,6 +773,145 @@ class EmailVerificationService
         $endTime = microtime(true);
         $result['duration'] = round(($endTime - $startTime) * 1000, 2); // Duration in milliseconds
     }
+    
+    /**
+     * Determine state and result based on checks and current status
+     * Following Emailable API format: https://help.emailable.com/en-us/article/verification-results-all-possible-states-and-reasons-fjsjn2/
+     */
+    private function determineStateAndResult(array $result): array
+    {
+        $currentStatus = $result['status'] ?? 'unknown';
+        $error = $result['error'] ?? null;
+        
+        // Check for syntax error first (highest priority)
+        if (!($result['syntax'] ?? false)) {
+            return [
+                'state' => 'undeliverable',
+                'result' => 'syntax_error',
+            ];
+        }
+        
+        // Check for typo domain
+        if ($result['typo_domain'] ?? false) {
+            return [
+                'state' => 'undeliverable',
+                'result' => 'typo',
+            ];
+        }
+        
+        // Check for disposable email
+        if ($result['disposable'] ?? false) {
+            return [
+                'state' => 'undeliverable',
+                'result' => 'disposable',
+            ];
+        }
+        
+        // Check for blacklist/blocked
+        if ($result['blacklist'] ?? false || $currentStatus === 'spamtrap' || $currentStatus === 'abuse' || $currentStatus === 'do_not_mail') {
+            return [
+                'state' => 'undeliverable',
+                'result' => 'blocked',
+            ];
+        }
+        
+        // Check for mailbox full
+        if ($result['mailbox_full'] ?? false) {
+            return [
+                'state' => 'risky',
+                'result' => 'mailbox_full',
+            ];
+        }
+        
+        // Check for role-based email
+        if ($result['role'] ?? false) {
+            return [
+                'state' => 'risky',
+                'result' => 'role',
+            ];
+        }
+        
+        // Check for catch-all
+        if ($currentStatus === 'catch_all') {
+            return [
+                'state' => 'risky',
+                'result' => 'catch_all',
+            ];
+        }
+        
+        // Check for valid email (SMTP verified or high confidence)
+        if ($result['smtp'] ?? false) {
+            return [
+                'state' => 'deliverable',
+                'result' => 'valid',
+            ];
+        }
+        
+        // If MX records exist and domain is valid, but SMTP not checked (public providers)
+        if (($result['mx_record'] ?? false) && ($result['domain_validity'] ?? false) && $currentStatus === 'valid') {
+            return [
+                'state' => 'deliverable',
+                'result' => 'valid',
+            ];
+        }
+        
+        // Check for invalid domain or no MX records
+        if (!($result['mx_record'] ?? false) || !($result['domain_validity'] ?? false)) {
+            if ($currentStatus === 'invalid') {
+                return [
+                    'state' => 'undeliverable',
+                    'result' => 'mailbox_not_found',
+                ];
+            }
+        }
+        
+        // Check for connection/timeout errors
+        if ($error && (
+            str_contains(strtolower($error), 'timeout') ||
+            str_contains(strtolower($error), 'connection') ||
+            str_contains(strtolower($error), 'unavailable') ||
+            str_contains(strtolower($error), 'could not connect')
+        )) {
+            return [
+                'state' => 'unknown',
+                'result' => null,
+            ];
+        }
+        
+        // Check for unexpected errors
+        if ($error && $currentStatus === 'unknown') {
+            return [
+                'state' => 'error',
+                'result' => 'error',
+            ];
+        }
+        
+        // Default: unknown
+        if ($currentStatus === 'unknown') {
+            return [
+                'state' => 'unknown',
+                'result' => null,
+            ];
+        }
+        
+        // Fallback: map old status to new format
+        return [
+            'state' => match($currentStatus) {
+                'valid' => 'deliverable',
+                'invalid', 'spamtrap', 'abuse', 'do_not_mail' => 'undeliverable',
+                'risky', 'catch_all' => 'risky',
+                default => 'unknown',
+            },
+            'result' => match($currentStatus) {
+                'valid' => 'valid',
+                'invalid' => 'mailbox_not_found',
+                'spamtrap', 'abuse', 'do_not_mail' => 'blocked',
+                'risky' => 'catch_all',
+                'catch_all' => 'catch_all',
+                default => null,
+            },
+        ];
+    }
 
     public function verify(string $email, ?int $userId = null, ?int $teamId = null, ?int $tokenId = null, ?int $bulkJobId = null, ?string $source = null): array
     {
@@ -822,15 +961,21 @@ class EmailVerificationService
             $result['domain'] = $parts['domain'];
 
             // 1. Syntax check
-            $result['checks']['syntax'] = $this->checkSyntax($email);
-            if (!$result['checks']['syntax']) {
+            $syntaxCheck = $this->checkSyntax($email);
+            $result['syntax'] = $syntaxCheck;
+            if (!$syntaxCheck) {
                 // Set free flag early (by domain name only)
-                $result['free'] = $this->isFreeEmailProviderByDomain($parts['domain']);
+                $result['is_free'] = $this->isFreeEmailProviderByDomain($parts['domain']);
+                $result['free'] = $result['is_free']; // Keep for backward compatibility
                 
                 $result['status'] = 'invalid';
                 $result['error'] = $this->getErrorMessages()['invalid_syntax'];
                 $result['score'] = 0;
                 $this->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
@@ -844,17 +989,18 @@ class EmailVerificationService
                 $notes = $blacklist->notes ? " - {$blacklist->notes}" : '';
                 $result['error'] = str_replace([':reason', ':notes'], [$blacklist->reason, $notes], $errorTemplate);
                 $result['score'] = 0;
-                $result['checks']['blacklist'] = true;
+                $result['blacklist'] = true;
                 $this->addDuration($result, $startTime);
                 $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
-            $result['checks']['blacklist'] = false;
+            $result['blacklist'] = false;
 
             // 2.5. No-reply keywords check (synthetic addresses / list poisoning)
-            $result['checks']['no_reply'] = $this->checkNoReply($parts['account']);
-            if ($result['checks']['no_reply']) {
+            $noReplyCheck = $this->checkNoReply($parts['account']);
+            $result['no_reply'] = $noReplyCheck;
+            if ($noReplyCheck) {
                 $riskChecks = $this->getRiskChecks();
                 $result['status'] = $riskChecks['no_reply_status'] ?? 'do_not_mail';
                 $result['score'] = 0;
@@ -866,8 +1012,10 @@ class EmailVerificationService
             // 2.6. Typo domain check (spam trap domains)
             $riskChecks = $this->getRiskChecks();
             if ($riskChecks['enable_typo_check'] ?? true) {
-                $result['checks']['typo_domain'] = $this->checkTypoDomain($parts['domain']);
-                if ($result['checks']['typo_domain']) {
+                $typoCheck = $this->checkTypoDomain($parts['domain']);
+                $result['typo_domain'] = $typoCheck;
+                $result['typo_domain'] = $typoCheck;
+                if ($typoCheck) {
                     // Get the corrected domain
                     $correctedDomain = $this->getTypoCorrection($parts['domain']);
                     if ($correctedDomain) {
@@ -886,8 +1034,8 @@ class EmailVerificationService
 
             // 2.7. ISP/ESP infrastructure domain check
             if ($riskChecks['enable_isp_esp_check'] ?? true) {
-                $result['checks']['isp_esp'] = $this->checkIspEspDomain($parts['domain']);
-                if ($result['checks']['isp_esp']) {
+                $result['isp_esp'] = $this->checkIspEspDomain($parts['domain']);
+                if ($result['isp_esp']) {
                     $result['status'] = $riskChecks['isp_esp_status'] ?? 'do_not_mail';
                     $result['score'] = 0;
                     $result['error'] = 'ISP/ESP infrastructure domain (not for marketing)';
@@ -899,16 +1047,17 @@ class EmailVerificationService
 
             // 2.8. Government/registry TLD check
             if ($riskChecks['enable_government_check'] ?? true) {
-                $result['checks']['government_tld'] = $this->checkGovernmentTld($parts['domain']);
-                if ($result['checks']['government_tld']) {
+                $result['government_tld'] = $this->checkGovernmentTld($parts['domain']);
+                if ($result['government_tld']) {
                     $result['status'] = $riskChecks['government_tld_status'] ?? 'risky';
                     // Don't return early - just mark as risky and continue
                 }
             }
 
             // 3. Disposable email check
-            $result['checks']['disposable'] = $this->checkDisposable($parts['domain']);
-            if ($result['checks']['disposable']) {
+            $disposableCheck = $this->checkDisposable($parts['domain']);
+            $result['disposable'] = $disposableCheck;
+            if ($disposableCheck) {
                 // Set free flag early (by domain name only)
                 $result['free'] = $this->isFreeEmailProviderByDomain($parts['domain']);
                 
@@ -930,8 +1079,9 @@ class EmailVerificationService
             }
 
             // 3. Role-based email check
-            $result['checks']['role'] = $this->checkRoleBased($parts['account']);
-            if ($result['checks']['role']) {
+            $roleCheck = $this->checkRoleBased($parts['account']);
+            $result['role'] = $roleCheck;
+            if ($roleCheck) {
                 $result['status'] = 'risky';
             }
 
@@ -941,20 +1091,25 @@ class EmailVerificationService
                 $result['status'] = $domainValidity['status'] ?? 'invalid';
                 $result['error'] = $domainValidity['error'] ?? 'Domain does not exist or is not accessible';
                 $result['score'] = 0;
-                $result['checks']['domain_validity'] = false;
+                $result['domain_validity'] = false;
                 $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
-            $result['checks']['domain_validity'] = true;
+            $result['domain_validity'] = true;
 
             // 4. MX check
-            $result['checks']['mx'] = $this->checkMx($parts['domain']);
-            if (!$result['checks']['mx']) {
+            $mxCheck = $this->checkMx($parts['domain']);
+            $result['mx_record'] = $mxCheck;
+            if (!$mxCheck) {
                 $result['status'] = 'invalid';
                 $result['error'] = $this->getErrorMessages()['no_mx_records'];
                 $result['score'] = $this->calculateScore($result['checks']);
                 $this->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
@@ -964,24 +1119,29 @@ class EmailVerificationService
             $publicProvider = $this->isPublicProvider($parts['domain'], $mxRecords);
             
             // Set free flag if domain is a public provider (free email provider)
-            $result['free'] = $publicProvider !== null;
+            $result['is_free'] = $publicProvider !== null;
+            $result['free'] = $result['is_free']; // Keep for backward compatibility
             
             if ($publicProvider && ($publicProvider['skip_smtp'] ?? false)) {
                 // Skip SMTP check for public providers, but mark as valid if MX records exist
-                if ($result['checks']['mx']) {
+                if ($result['mx_record']) {
                     $result['status'] = $publicProvider['status'] ?? 'valid';
-                    $result['checks']['smtp'] = false; // Not checked, but valid (public providers block SMTP checks)
+                    $result['smtp'] = false; // Not checked, but valid (public providers block SMTP checks)
                     // For public providers, give full score since they're known valid providers
                     $result['score'] = 100; // Public providers are always valid if MX records exist
                     $result['error'] = null; // Clear any errors
                     $this->addDuration($result, $startTime);
+                    // Determine state and result before saving
+                    $stateAndResult = $this->determineStateAndResult($result);
+                    $result['state'] = $stateAndResult['state'];
+                    $result['result'] = $stateAndResult['result'];
                     $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                     return $result;
                 }
             }
 
             // Calculate score before SMTP check (for faster response if SMTP fails)
-            $result['score'] = $this->calculateScore($result['checks']);
+            $result['score'] = $this->calculateScore($result);
 
             // 5. SMTP check (lėčiausias check, daromas paskutinis) - wrapped in try-catch to not fail entire verification
             // Only perform if enabled in config and rate limit allows
@@ -990,14 +1150,15 @@ class EmailVerificationService
                     // Check rate limit before performing SMTP check
                     if ($this->checkSmtpRateLimit($parts['domain'])) {
                         $smtpResult = $this->checkSmtpWithDetails($email, $parts['domain']);
-                        $result['checks']['smtp'] = $smtpResult['valid'];
+                        $smtpCheck = $smtpResult['valid'];
+                        $result['smtp'] = $smtpCheck;
                         $result['mailbox_full'] = $smtpResult['mailbox_full'] ?? false;
                         
                         // Recalculate score after SMTP check
-                        $result['score'] = $this->calculateScore($result['checks']);
+                        $result['score'] = $this->calculateScore($result);
                     } else {
                         // Rate limit exceeded, skip SMTP check
-                        $result['checks']['smtp'] = false;
+                        $result['smtp'] = false;
                         Log::info('SMTP check skipped due to rate limit', [
                             'email' => $email,
                             'domain' => $parts['domain'],
@@ -1009,14 +1170,14 @@ class EmailVerificationService
                         'domain' => $parts['domain'],
                         'error' => $e->getMessage(),
                     ]);
-                    $result['checks']['smtp'] = false;
+                    $result['smtp'] = false;
                 }
             } else {
-                $result['checks']['smtp'] = false; // Not checked
+                $result['smtp'] = false; // Not checked
             }
 
             // Catch-all detection (if enabled and SMTP check didn't pass)
-            if (!$result['checks']['smtp'] && config('email-verification.enable_catch_all_detection', false)) {
+            if (!$result['smtp'] && config('email-verification.enable_catch_all_detection', false)) {
                 try {
                     if ($this->isCatchAllServer($parts['domain'])) {
                         $result['status'] = config('email-verification.catch_all_status', 'catch_all');
@@ -1037,16 +1198,21 @@ class EmailVerificationService
 
             // Determine final status based on config rules
             $statusRules = $this->getStatusRules();
-            if ($result['checks']['smtp']) {
+            if ($result['smtp']) {
                 $result['status'] = $statusRules['smtp_valid'];
             } elseif ($result['score'] >= ($statusRules['min_score_for_catch_all'] ?? 50)) {
-                $result['status'] = $result['checks']['role'] 
+                $result['status'] = $result['role'] 
                     ? ($statusRules['role_emails_status'] ?? 'risky')
                     : ($statusRules['non_role_emails_status'] ?? 'catch_all');
             } else {
                 $result['status'] = $statusRules['default_invalid'] ?? 'invalid';
             }
 
+            // Determine state and result before saving
+            $stateAndResult = $this->determineStateAndResult($result);
+            $result['state'] = $stateAndResult['state'];
+            $result['result'] = $stateAndResult['result'];
+            
             // Save to database
             $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
 
@@ -1091,10 +1257,27 @@ class EmailVerificationService
                 'email' => $result['email'],
                 'account' => $parts['account'] ?? null,
                 'domain' => $parts['domain'] ?? null,
-                'status' => $result['status'],
-                'checks' => $result['checks'],
-                'score' => $result['score'],
-                'error' => $result['error'],
+                'state' => $result['state'] ?? 'unknown',
+                'result' => $result['result'] ?? null,
+                'syntax' => $result['syntax'] ?? false,
+                'mx_record' => $result['mx_record'] ?? false,
+                'smtp' => $result['smtp'] ?? false,
+                'disposable' => $result['disposable'] ?? false,
+                'role' => $result['role'] ?? false,
+                'no_reply' => $result['no_reply'] ?? false,
+                'typo_domain' => $result['typo_domain'] ?? false,
+                'mailbox_full' => $result['mailbox_full'] ?? false,
+                'is_free' => $result['is_free'] ?? $result['free'] ?? false,
+                'blacklist' => $result['blacklist'] ?? false,
+                'domain_validity' => $result['domain_validity'] ?? false,
+                'isp_esp' => $result['isp_esp'] ?? false,
+                'government_tld' => $result['government_tld'] ?? false,
+                'ai_analysis' => $result['ai_analysis'] ?? false,
+                'ai_insights' => $result['ai_insights'] ?? null,
+                'ai_confidence' => $result['ai_confidence'] ?? null,
+                'ai_risk_factors' => $result['ai_risk_factors'] ?? null,
+                'did_you_mean' => $result['did_you_mean'] ?? null,
+                'score' => $result['score'] ?? null,
                 'verified_at' => now(),
             ]);
             
@@ -1103,15 +1286,16 @@ class EmailVerificationService
                 Log::debug('Email verification saved', [
                     'id' => $verification->id,
                     'email' => $result['email'],
-                    'status' => $result['status'],
+                    'state' => $result['state'] ?? 'unknown',
                 ]);
             }
         } catch (\Exception $e) {
             Log::error('Failed to save email verification', [
-                'email' => $result['email'],
+                'email' => $result['email'] ?? 'unknown',
                 'user_id' => $userId,
                 'team_id' => $teamId,
                 'error' => $e->getMessage(),
+                'trace' => substr($e->getTraceAsString(), 0, 500), // First 500 chars of trace
             ]);
             // Don't throw - we still want to return the result
         }

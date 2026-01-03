@@ -27,7 +27,7 @@ const individualVerifications = computed(() => sidebarVerifications.value.indivi
 // Combined and sorted list of all verifications
 const allVerifications = computed(() => {
     const combined = [];
-    
+
     // Add bulk jobs
     bulkJobs.value.forEach(job => {
         combined.push({
@@ -42,7 +42,7 @@ const allVerifications = computed(() => {
             completed_at: job.completed_at,
         });
     });
-    
+
     // Add individual verifications
     individualVerifications.value.forEach(verification => {
         combined.push({
@@ -50,12 +50,12 @@ const allVerifications = computed(() => {
             type: 'individual',
             title: verification.email,
             email: verification.email,
-            status: verification.status,
+            status: verification.state || verification.result || 'unknown',
             score: verification.score,
             created_at: verification.created_at,
         });
     });
-    
+
     // Sort by created_at (newest first)
     return combined.sort((a, b) => {
         const dateA = new Date(a.created_at);
@@ -84,12 +84,12 @@ const formatDate = (dateString) => {
     const diffMins = Math.floor(diffMs / 60000);
     const diffHours = Math.floor(diffMs / 3600000);
     const diffDays = Math.floor(diffMs / 86400000);
-    
+
     if (diffMins < 1) return 'Just now';
     if (diffMins < 60) return `${diffMins}m ago`;
     if (diffHours < 24) return `${diffHours}h ago`;
     if (diffDays < 7) return `${diffDays}d ago`;
-    
+
     return date.toLocaleDateString();
 };
 
@@ -121,7 +121,7 @@ router.on('finish', () => {
 <!--        <Banner />-->
 
         <div class="flex min-h-screen max-h-screen overflow-hidden">
-            <aside class="w-[260px] p-4 bg-gray-100 dark:bg-gray-900">
+            <aside class="w-[260px] p-4 bg-gray-100 dark:bg-gray-900 flex flex-col gap-6">
                 <!-- Logo -->
                 <div class="shrink-0 flex items-center">
                     <Link :href="route('dashboard')">
@@ -129,20 +129,24 @@ router.on('finish', () => {
                     </Link>
                 </div>
 
+                <Link :href="route('dashboard')" class="rounded-md bg-white/10 hover:bg-white/20 px-4 py-2 font-medium text-sm">
+                    Chat
+                </Link>
+
                 <!-- Email and batches list -->
-                <div class="mt-6 space-y-2 max-h-[calc(100vh-8rem)] overflow-y-auto">
+                <div class="space-y-2 max-h-[calc(100vh-8rem)] overflow-y-auto">
                     <div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">
                         Recent Verifications
                     </div>
-                    
+
                     <!-- Combined list of all verifications -->
-                    <div v-for="item in allVerifications.slice(0, 20)" :key="`${item.type}-${item.id}`" class="mb-2">
+                    <div v-for="item in allVerifications" :key="`${item.type}-${item.id}`" class="mb-2">
                         <!-- Bulk Job -->
-                        <Link 
+                        <Link
                             v-if="item.type === 'bulk'"
                             :href="route('verifications.bulk', item.id)"
                             class="block p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors border border-gray-200 dark:border-gray-700"
-                            :class="{ 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700': route().current('verifications.bulk', item.id) }"
+                            :class="{ 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700': route().current('verifications.bulk') && $page.url.includes(`/verifications/bulk/${item.id}`) }"
                         >
                             <div class="flex items-start justify-between mb-1">
                                 <div class="flex-1 min-w-0">
@@ -171,13 +175,13 @@ router.on('finish', () => {
                                 <span class="text-yellow-600 dark:text-yellow-400">⚠ {{ item.stats.risky }}</span>
                             </div>
                         </Link>
-                        
+
                         <!-- Individual Email -->
-                        <Link 
+                        <Link
                             v-else
                             :href="route('verifications.email', item.id)"
                             class="block p-2 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors"
-                            :class="{ 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700': route().current('verifications.email', item.id) }"
+                            :class="{ 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700': route().current('verifications.email') && $page.url.includes(`/verifications/email/${item.id}`) }"
                         >
                             <div class="flex items-start justify-between mb-1">
                                 <div class="flex-1 min-w-0">
@@ -202,22 +206,34 @@ router.on('finish', () => {
                                 </div>
                         </Link>
                     </div>
-                    
+
                     <!-- Empty state -->
                     <div v-if="!loading && allVerifications.length === 0" class="text-xs text-gray-500 dark:text-gray-400 text-center py-4">
                         No verifications yet
+                    </div>
+
+                    <!-- View all verifications link -->
+                    <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
+                        <Link
+                            :href="route('verifications')"
+                            class="block text-center text-sm font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 transition-colors"
+                        >
+                            View all verifications →
+                        </Link>
                     </div>
                 </div>
             </aside>
             <main class="w-full flex-1 min-h-screen overflow-y-auto">
                 <nav class="sticky top-0 bg-white dark:bg-gray-800 border-b  border-gray-100 dark:border-white/10">
                     <!-- Primary Navigation Menu -->
-                    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                    <div  class="px-4 sm:px-6 lg:px-8">
                         <div class="flex justify-between h-14">
                             <div class="flex">
 
+                                <div class="flex items-center">Email verification</div>
+
                                 <!-- Navigation Links -->
-                                <div class="hidden space-x-8 sm:flex">
+                                <div v-if="false" class="hidden space-x-8 sm:flex">
                                     <NavLink :href="route('dashboard')" :active="route().current('dashboard')">
                                         Dashboard
                                     </NavLink>

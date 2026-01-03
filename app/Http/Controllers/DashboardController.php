@@ -28,10 +28,10 @@ class DashboardController extends Controller
             ->whereDate('created_at', today())
             ->selectRaw('
                 COUNT(*) as total,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
-                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
-            ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as invalid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as risky
+            ', ['deliverable', 'undeliverable', 'risky'])
             ->first();
 
         // Month's stats - filter by team_id
@@ -40,10 +40,10 @@ class DashboardController extends Controller
             ->whereYear('created_at', now()->year)
             ->selectRaw('
                 COUNT(*) as total,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
-                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
-            ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as invalid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as risky
+            ', ['deliverable', 'undeliverable', 'risky'])
             ->first();
 
         // Calculate percentages
@@ -93,10 +93,10 @@ class DashboardController extends Controller
             ->selectRaw('
                 DATE(created_at) as date,
                 COUNT(*) as total,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
-                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
-            ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as invalid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as risky
+            ', ['deliverable', 'undeliverable', 'risky'])
             ->groupBy(\DB::raw('DATE(created_at)'))
             ->orderBy('date', 'asc')
             ->get()
@@ -140,10 +140,10 @@ class DashboardController extends Controller
             ->selectRaw('
                 bulk_verification_job_id,
                 COUNT(*) as total,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
-                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
-            ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as invalid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as risky
+            ', ['deliverable', 'undeliverable', 'risky'])
             ->groupBy('bulk_verification_job_id')
             ->get()
             ->keyBy('bulk_verification_job_id');
@@ -152,7 +152,7 @@ class DashboardController extends Controller
             $stats = $statsQuery->get($bulkJob->id);
 
             return [
-                'id' => $bulkJob->id,
+                'id' => $bulkJob->uuid,
                 'type' => 'bulk',
                 'filename' => $bulkJob->filename,
                 'status' => $bulkJob->status,
@@ -177,13 +177,32 @@ class DashboardController extends Controller
             ->limit(50)
             ->get()
             ->map(function ($verification) {
+                // Build checks array from individual columns
+                $checks = [
+                    'syntax' => $verification->syntax ?? false,
+                    'mx_record' => $verification->mx_record ?? false,
+                    'smtp' => $verification->smtp ?? false,
+                    'disposable' => $verification->disposable ?? false,
+                    'role' => $verification->role ?? false,
+                    'no_reply' => $verification->no_reply ?? false,
+                    'typo_domain' => $verification->typo_domain ?? false,
+                    'mailbox_full' => $verification->mailbox_full ?? false,
+                    'is_free' => $verification->is_free ?? false,
+                    'blacklist' => $verification->blacklist ?? false,
+                    'domain_validity' => $verification->domain_validity ?? false,
+                    'isp_esp' => $verification->isp_esp ?? false,
+                    'government_tld' => $verification->government_tld ?? false,
+                    'ai_analysis' => $verification->ai_analysis ?? false,
+                ];
+                
                 return [
-                    'id' => $verification->id,
+                    'id' => $verification->uuid,
                     'type' => 'individual',
                     'email' => $verification->email,
-                    'status' => $verification->status,
+                    'state' => $verification->state,
+                    'result' => $verification->result,
                     'score' => $verification->score,
-                    'checks' => $verification->checks,
+                    'checks' => $checks,
                     'created_at' => $verification->created_at?->toIso8601String() ?? $verification->created_at,
                 ];
             });
@@ -194,7 +213,7 @@ class DashboardController extends Controller
         ]);
     }
 
-    public function bulkJobEmails(int $bulkJobId, Request $request): JsonResponse
+    public function bulkJobEmails(BulkVerificationJob $bulkJob, Request $request): JsonResponse
     {
         $user = $request->user();
         $team = $user->currentTeam;
@@ -205,24 +224,43 @@ class DashboardController extends Controller
         }
 
         // Verify the bulk job belongs to the team
-        $bulkJob = BulkVerificationJob::where('id', $bulkJobId)
+        $bulkJob = BulkVerificationJob::where('uuid', $bulkJob->uuid)
             ->where('team_id', $teamId)
             ->firstOrFail();
 
         // Get all emails for this bulk job
-        $emails = EmailVerification::where('bulk_verification_job_id', $bulkJobId)
+        $emails = EmailVerification::where('bulk_verification_job_id', $bulkJob->id)
             ->orderBy('created_at', 'desc')
             ->get()
             ->map(function ($verification) {
-                $checks = $verification->checks ?? [];
+                // Build checks array from individual columns
+                $checks = [
+                    'syntax' => $verification->syntax ?? false,
+                    'mx_record' => $verification->mx_record ?? false,
+                    'smtp' => $verification->smtp ?? false,
+                    'disposable' => $verification->disposable ?? false,
+                    'role' => $verification->role ?? false,
+                    'no_reply' => $verification->no_reply ?? false,
+                    'typo_domain' => $verification->typo_domain ?? false,
+                    'mailbox_full' => $verification->mailbox_full ?? false,
+                    'is_free' => $verification->is_free ?? false,
+                    'blacklist' => $verification->blacklist ?? false,
+                    'domain_validity' => $verification->domain_validity ?? false,
+                    'isp_esp' => $verification->isp_esp ?? false,
+                    'government_tld' => $verification->government_tld ?? false,
+                    'ai_analysis' => $verification->ai_analysis ?? false,
+                    'did_you_mean' => $verification->did_you_mean ?? null,
+                ];
+                
                 return [
-                    'id' => $verification->id,
+                    'id' => $verification->uuid,
                     'email' => $verification->email,
-                    'status' => $verification->status,
+                    'state' => $verification->state,
+                    'result' => $verification->result,
                     'score' => $verification->score,
                     'checks' => $checks,
-                    'ai_confidence' => $checks['ai_confidence'] ?? null,
-                    'ai_insights' => $checks['ai_insights'] ?? null,
+                    'ai_confidence' => $verification->ai_confidence ?? null,
+                    'ai_insights' => $verification->ai_insights ?? null,
                     'created_at' => $verification->created_at,
                 ];
             });
@@ -230,7 +268,7 @@ class DashboardController extends Controller
         return response()->json($emails);
     }
 
-    public function bulkJobDetail(int $bulkJobId, Request $request): JsonResponse
+    public function bulkJobDetail(BulkVerificationJob $bulkJob, Request $request): JsonResponse
     {
         $user = $request->user();
         $team = $user->currentTeam;
@@ -241,18 +279,18 @@ class DashboardController extends Controller
         }
 
         // Verify the bulk job belongs to the team
-        $bulkJob = BulkVerificationJob::where('id', $bulkJobId)
+        $bulkJob = BulkVerificationJob::where('uuid', $bulkJob->uuid)
             ->where('team_id', $teamId)
             ->firstOrFail();
 
         // Get stats for this bulk job
-        $stats = EmailVerification::where('bulk_verification_job_id', $bulkJobId)
+        $stats = EmailVerification::where('bulk_verification_job_id', $bulkJob->id)
             ->selectRaw('
                 COUNT(*) as total,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
-                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
-            ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as invalid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as risky
+            ', ['deliverable', 'undeliverable', 'risky'])
             ->first();
 
         $percentages = [
@@ -263,7 +301,7 @@ class DashboardController extends Controller
 
         return response()->json([
             'bulk_job' => [
-                'id' => $bulkJob->id,
+                'id' => $bulkJob->uuid,
                 'filename' => $bulkJob->filename,
                 'source' => $bulkJob->source,
                 'status' => $bulkJob->status,
@@ -283,7 +321,7 @@ class DashboardController extends Controller
         ]);
     }
 
-    public function bulkJobEmailsPaginated(int $bulkJobId, Request $request): JsonResponse
+    public function bulkJobEmailsPaginated(BulkVerificationJob $bulkJob, Request $request): JsonResponse
     {
         $user = $request->user();
         $team = $user->currentTeam;
@@ -293,29 +331,61 @@ class DashboardController extends Controller
             return response()->json(['error' => 'No team selected'], 403);
         }
 
+        // Log for debugging
+        \Log::info('bulkJobEmailsPaginated called', [
+            'uuid' => $bulkJob->uuid ?? 'null',
+            'id' => $bulkJob->id ?? 'null',
+            'team_id' => $teamId,
+        ]);
+
         // Verify the bulk job belongs to the team
-        $bulkJob = BulkVerificationJob::where('id', $bulkJobId)
+        $bulkJob = BulkVerificationJob::where('uuid', $bulkJob->uuid)
             ->where('team_id', $teamId)
             ->firstOrFail();
 
         $perPage = $request->get('per_page', 50);
         $page = $request->get('page', 1);
 
-        $emails = EmailVerification::where('bulk_verification_job_id', $bulkJobId)
+        // Log email count
+        $emailCount = EmailVerification::where('bulk_verification_job_id', $bulkJob->id)->count();
+        \Log::info('Email count for bulk job', [
+            'bulk_job_id' => $bulkJob->id,
+            'email_count' => $emailCount,
+        ]);
+
+        $emails = EmailVerification::where('bulk_verification_job_id', $bulkJob->id)
             ->orderBy('created_at', 'desc')
             ->paginate($perPage, ['*'], 'page', $page);
 
         $data = $emails->map(function ($verification) {
-            $checks = $verification->checks ?? [];
+            // Build checks array from individual columns
+            $checks = [
+                'syntax' => $verification->syntax ?? false,
+                'mx_record' => $verification->mx_record ?? false,
+                'smtp' => $verification->smtp ?? false,
+                'disposable' => $verification->disposable ?? false,
+                'role' => $verification->role ?? false,
+                'no_reply' => $verification->no_reply ?? false,
+                'typo_domain' => $verification->typo_domain ?? false,
+                'mailbox_full' => $verification->mailbox_full ?? false,
+                'is_free' => $verification->is_free ?? false,
+                'blacklist' => $verification->blacklist ?? false,
+                'domain_validity' => $verification->domain_validity ?? false,
+                'isp_esp' => $verification->isp_esp ?? false,
+                'government_tld' => $verification->government_tld ?? false,
+                'ai_analysis' => $verification->ai_analysis ?? false,
+                'did_you_mean' => $verification->did_you_mean ?? null,
+            ];
+            
             return [
-                'id' => $verification->id,
+                'id' => $verification->uuid,
                 'email' => $verification->email,
-                'status' => $verification->status,
+                'state' => $verification->state,
+                'result' => $verification->result,
                 'score' => $verification->score,
                 'checks' => $checks,
-                'ai_confidence' => $checks['ai_confidence'] ?? null,
-                'ai_insights' => $checks['ai_insights'] ?? null,
-                'error' => $verification->error,
+                'ai_confidence' => $verification->ai_confidence ?? null,
+                'ai_insights' => $verification->ai_insights ?? null,
                 'created_at' => $verification->created_at?->toIso8601String(),
             ];
         });
@@ -331,7 +401,7 @@ class DashboardController extends Controller
         ]);
     }
 
-    public function verificationDetail(int $verification, Request $request): JsonResponse
+    public function verificationDetail(EmailVerification $verification, Request $request): JsonResponse
     {
         $user = $request->user();
         $team = $user->currentTeam;
@@ -342,21 +412,41 @@ class DashboardController extends Controller
         }
 
         // Verify the verification belongs to the team
-        $emailVerification = EmailVerification::where('id', $verification)
+        $emailVerification = EmailVerification::where('uuid', $verification->uuid)
             ->where('team_id', $teamId)
             ->firstOrFail();
 
-        $checks = $emailVerification->checks ?? [];
+        // Build checks array from individual columns
+        $checks = [
+            'syntax' => $emailVerification->syntax ?? false,
+            'mx_record' => $emailVerification->mx_record ?? false,
+            'smtp' => $emailVerification->smtp ?? false,
+            'disposable' => $emailVerification->disposable ?? false,
+            'role' => $emailVerification->role ?? false,
+            'no_reply' => $emailVerification->no_reply ?? false,
+            'typo_domain' => $emailVerification->typo_domain ?? false,
+            'mailbox_full' => $emailVerification->mailbox_full ?? false,
+            'is_free' => $emailVerification->is_free ?? false,
+            'blacklist' => $emailVerification->blacklist ?? false,
+            'domain_validity' => $emailVerification->domain_validity ?? false,
+            'isp_esp' => $emailVerification->isp_esp ?? false,
+            'government_tld' => $emailVerification->government_tld ?? false,
+            'ai_analysis' => $emailVerification->ai_analysis ?? false,
+            'did_you_mean' => $emailVerification->did_you_mean ?? null,
+        ];
 
         return response()->json([
             'verification' => [
-                'id' => $emailVerification->id,
+                'id' => $emailVerification->uuid,
                 'email' => $emailVerification->email,
-                'status' => $emailVerification->status,
+                'state' => $emailVerification->state,
+                'result' => $emailVerification->result,
                 'score' => $emailVerification->score,
                 'checks' => $checks,
-                'ai_confidence' => $checks['ai_confidence'] ?? null,
-                'ai_insights' => $checks['ai_insights'] ?? null,
+                'ai_analysis' => $emailVerification->ai_analysis ?? false,
+                'ai_confidence' => $emailVerification->ai_confidence ?? null,
+                'ai_insights' => $emailVerification->ai_insights ?? null,
+                'ai_risk_factors' => $emailVerification->ai_risk_factors ?? null,
                 'source' => $emailVerification->source,
                 'created_at' => $emailVerification->created_at?->toIso8601String(),
                 'updated_at' => $emailVerification->updated_at?->toIso8601String(),

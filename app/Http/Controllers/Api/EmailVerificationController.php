@@ -130,7 +130,7 @@ class EmailVerificationController extends Controller
             return response()->json([
                 'message' => 'Verifications queued',
                 'count' => count($emails),
-                'bulk_job_id' => $bulkJob->id,
+                'bulk_job_id' => $bulkJob->uuid,
             ], 202);
         }
 
@@ -167,7 +167,7 @@ class EmailVerificationController extends Controller
         return response()->json([
             'results' => $results,
             'count' => count($results),
-            'bulk_job_id' => $bulkJob->id,
+            'bulk_job_id' => $bulkJob->uuid,
         ]);
     }
 }

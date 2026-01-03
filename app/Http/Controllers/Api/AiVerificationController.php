@@ -152,7 +152,7 @@ class AiVerificationController extends Controller
 
         return response()->json([
             'message' => 'Batch verification started',
-            'bulk_job_id' => $bulkJob->id,
+            'bulk_job_id' => $bulkJob->uuid,
             'total_emails' => count($emails),
         ], 202);
     }
@@ -223,7 +223,7 @@ class AiVerificationController extends Controller
 
         return response()->json([
             'message' => 'File verification started',
-            'bulk_job_id' => $bulkJob->id,
+            'bulk_job_id' => $bulkJob->uuid,
             'total_emails' => count($emails),
         ], 202);
     }

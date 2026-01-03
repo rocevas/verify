@@ -13,6 +13,7 @@ return new class extends Migration
     {
         Schema::create('bulk_verification_jobs', function (Blueprint $table) {
             $table->id();
+            $table->uuid('uuid')->nullable()->unique();
             $table->foreignId('user_id')->constrained()->nullOnDelete();
             $table->foreignId('team_id')->constrained()->cascadeOnDelete();
             $table->unsignedBigInteger('api_key_id')->nullable()->comment('Sanctum token ID reference');

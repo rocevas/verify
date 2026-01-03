@@ -118,7 +118,7 @@ const uploadCsv = async () => {
 
         csvSuccess.value = `File uploaded successfully! Job ID: ${response.data.job_id}. Processing ${response.data.total_emails} emails...`;
         
-        // Redirect to bulk job detail page
+        // Redirect to bulk job detail page (job_id is now UUID)
         if (response.data.job_id) {
             setTimeout(() => {
                 router.visit(`/verifications/bulk/${response.data.job_id}`);

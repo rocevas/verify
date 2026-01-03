@@ -5,7 +5,7 @@ import AppLayout from '@/Layouts/AppLayout.vue';
 import PrimaryButton from '@/Components/PrimaryButton.vue';
 
 const props = defineProps({
-    verificationId: Number,
+    verificationId: String, // UUID, not Number
     title: String,
 });
 
@@ -15,12 +15,19 @@ const verification = ref(null);
 const loadVerification = async () => {
     loading.value = true;
     try {
+        console.log('Loading verification for UUID:', props.verificationId);
         const response = await axios.get(`/api/dashboard/verifications/${props.verificationId}`, {
             withCredentials: true,
         });
+        console.log('Verification response:', response.data);
         verification.value = response.data.verification;
     } catch (error) {
         console.error('Failed to load verification:', error);
+        console.error('Error response:', error.response?.data);
+        console.error('Error status:', error.response?.status);
+        if (error.response?.status === 404) {
+            console.error('Verification not found. UUID:', props.verificationId);
+        }
     } finally {
         loading.value = false;
     }
@@ -28,9 +35,15 @@ const loadVerification = async () => {
 
 const getStatusColor = (status) => {
     const colors = {
+        // State values
+        'deliverable': 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
+        'undeliverable': 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        'risky': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+        'unknown': 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200',
+        'error': 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        // Result values (for backward compatibility)
         'valid': 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
         'invalid': 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
-        'risky': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
         'catch_all': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
         'do_not_mail': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
     };
@@ -66,8 +79,8 @@ onMounted(() => {
                         </div>
 
                         <div v-else-if="verification" class="space-y-6">
-                            <!-- Email and Status -->
-                            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <!-- Email, State and Result -->
+                            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                                         Email Address
@@ -78,11 +91,21 @@ onMounted(() => {
                                 </div>
                                 <div>
                                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                                        Status
+                                        State
                                     </label>
-                                    <span :class="['px-3 py-1 inline-flex text-sm leading-5 font-semibold rounded-full', getStatusColor(verification.status)]">
-                                        {{ getStatusBadge(verification.status) }}
+                                    <span v-if="verification.state" :class="['px-3 py-1 inline-flex text-sm leading-5 font-semibold rounded-full', getStatusColor(verification.state)]">
+                                        {{ getStatusBadge(verification.state) }}
                                     </span>
+                                    <span v-else class="text-sm text-gray-500 dark:text-gray-400">N/A</span>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                                        Result
+                                    </label>
+                                    <span v-if="verification.result" :class="['px-3 py-1 inline-flex text-sm leading-5 font-semibold rounded-full', getStatusColor(verification.result)]">
+                                        {{ getStatusBadge(verification.result) }}
+                                    </span>
+                                    <span v-else class="text-sm text-gray-500 dark:text-gray-400">N/A</span>
                                 </div>
                             </div>
 
@@ -126,11 +149,12 @@ onMounted(() => {
                             </div>
 
                             <!-- AI Analysis -->
-                            <div v-if="verification.ai_confidence !== null || verification.ai_insights" class="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 border border-blue-200 dark:border-blue-800">
+                            <div v-if="verification.ai_analysis || verification.ai_confidence !== null || verification.ai_insights || verification.ai_risk_factors" class="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-4 border border-blue-200 dark:border-blue-800">
                                 <h3 class="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4 flex items-center gap-2">
                                     <span>🧠</span>
                                     AI Analysis
                                 </h3>
+                                
                                 <div v-if="verification.ai_confidence !== null" class="mb-4">
                                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                                         AI Confidence
@@ -145,12 +169,47 @@ onMounted(() => {
                                         ></div>
                                     </div>
                                 </div>
+
                                 <div v-if="verification.ai_insights" class="mt-4">
                                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                                         AI Insights
                                     </label>
                                     <div class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap bg-white dark:bg-gray-800 rounded p-3 border border-blue-200 dark:border-blue-700">
                                         {{ verification.ai_insights }}
+                                    </div>
+                                </div>
+
+                                <div v-if="verification.ai_risk_factors && Array.isArray(verification.ai_risk_factors) && verification.ai_risk_factors.length > 0" class="mt-4">
+                                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                                        AI Risk Factors
+                                    </label>
+                                    <div class="space-y-2">
+                                        <div
+                                            v-for="(risk, index) in verification.ai_risk_factors"
+                                            :key="index"
+                                            class="flex items-start gap-2 bg-white dark:bg-gray-800 rounded p-2 border border-orange-200 dark:border-orange-700"
+                                        >
+                                            <span class="text-orange-600 dark:text-orange-400 mt-0.5">⚠️</span>
+                                            <span class="text-sm text-gray-700 dark:text-gray-300 flex-1">{{ risk }}</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div v-else-if="verification.ai_risk_factors && typeof verification.ai_risk_factors === 'object'" class="mt-4">
+                                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                                        AI Risk Factors
+                                    </label>
+                                    <div class="space-y-2">
+                                        <div
+                                            v-for="(value, key) in verification.ai_risk_factors"
+                                            :key="key"
+                                            class="flex items-center justify-between bg-white dark:bg-gray-800 rounded p-2 border border-orange-200 dark:border-orange-700"
+                                        >
+                                            <span class="text-sm text-gray-700 dark:text-gray-300 capitalize">{{ key.replace(/_/g, ' ') }}</span>
+                                            <span class="text-sm font-semibold" :class="value ? 'text-orange-600 dark:text-orange-400' : 'text-gray-400'">
+                                                {{ value ? '⚠️' : '✓' }}
+                                            </span>
+                                        </div>
                                     </div>
                                 </div>
                             </div>

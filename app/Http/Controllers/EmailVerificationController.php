@@ -30,10 +30,10 @@ class EmailVerificationController extends Controller
         $stats = EmailVerification::where('team_id', $teamId)
             ->selectRaw('
                 COUNT(*) as total,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
-                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
-            ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as invalid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as risky
+            ', ['deliverable', 'undeliverable', 'risky'])
             ->first();
 
         $percentages = [
@@ -67,10 +67,10 @@ class EmailVerificationController extends Controller
             ->selectRaw('
                 DATE(created_at) as date,
                 COUNT(*) as total,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
-                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
-            ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as invalid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as risky
+            ', ['deliverable', 'undeliverable', 'risky'])
             ->groupBy(DB::raw('DATE(created_at)'))
             ->orderBy('date', 'asc')
             ->get()
@@ -101,18 +101,19 @@ class EmailVerificationController extends Controller
         $page = $request->get('page', 1);
 
         $verifications = EmailVerification::where('team_id', $teamId)
+            ->whereNull('bulk_verification_job_id') // Only individual verifications (single emails)
             ->orderBy('created_at', 'desc')
             ->paginate($perPage, ['*'], 'page', $page);
 
         $data = $verifications->map(function ($verification) {
             return [
-                'id' => $verification->id,
+                'id' => $verification->uuid,
                 'email' => $verification->email,
-                'status' => $verification->status,
+                'state' => $verification->state,
+                'result' => $verification->result,
                 'score' => $verification->score,
-                'checks' => $verification->checks,
+                'checks' => $this->buildChecksArray($verification),
                 'source' => $verification->source,
-                'error' => $verification->error,
                 'created_at' => $verification->created_at?->toIso8601String(),
             ];
         });
@@ -151,10 +152,10 @@ class EmailVerificationController extends Controller
             ->selectRaw('
                 bulk_verification_job_id,
                 COUNT(*) as total,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as valid,
-                SUM(CASE WHEN status = ? THEN 1 ELSE 0 END) as invalid,
-                SUM(CASE WHEN status IN (?, ?, ?) THEN 1 ELSE 0 END) as risky
-            ', ['valid', 'invalid', 'catch_all', 'risky', 'do_not_mail'])
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as valid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as invalid,
+                SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) as risky
+            ', ['deliverable', 'undeliverable', 'risky'])
             ->groupBy('bulk_verification_job_id')
             ->get()
             ->keyBy('bulk_verification_job_id');
@@ -163,7 +164,7 @@ class EmailVerificationController extends Controller
             $stats = $statsQuery->get($bulkJob->id);
 
             return [
-                'id' => $bulkJob->id,
+                'id' => $bulkJob->uuid,
                 'filename' => $bulkJob->filename,
                 'source' => $bulkJob->source,
                 'status' => $bulkJob->status,
@@ -190,5 +191,30 @@ class EmailVerificationController extends Controller
                 'total' => $bulkJobs->total(),
             ],
         ]);
+    }
+
+    /**
+     * Build checks array from individual columns
+     */
+    private function buildChecksArray(EmailVerification $verification): array
+    {
+        $checks = [
+            'syntax' => $verification->syntax ?? false,
+            'mx_record' => $verification->mx_record ?? false,
+            'smtp' => $verification->smtp ?? false,
+            'disposable' => $verification->disposable ?? false,
+            'role' => $verification->role ?? false,
+            'no_reply' => $verification->no_reply ?? false,
+            'typo_domain' => $verification->typo_domain ?? false,
+            'mailbox_full' => $verification->mailbox_full ?? false,
+            'is_free' => $verification->is_free ?? false,
+            'blacklist' => $verification->blacklist ?? false,
+            'domain_validity' => $verification->domain_validity ?? false,
+            'isp_esp' => $verification->isp_esp ?? false,
+            'government_tld' => $verification->government_tld ?? false,
+            'ai_analysis' => $verification->ai_analysis ?? false,
+            'did_you_mean' => $verification->did_you_mean ?? null,
+        ];
+        return $checks;
     }
 }

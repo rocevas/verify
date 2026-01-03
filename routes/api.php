@@ -21,7 +21,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::prefix('bulk')->group(function () {
         Route::post('/upload', [BulkVerificationController::class, 'upload']);
         Route::get('/jobs', [BulkVerificationController::class, 'list']);
-        Route::get('/jobs/{id}', [BulkVerificationController::class, 'status']);
-        Route::get('/jobs/{id}/download', [BulkVerificationController::class, 'download']);
+        Route::get('/jobs/{bulkJob:uuid}', [BulkVerificationController::class, 'status']);
+        Route::get('/jobs/{bulkJob:uuid}/download', [BulkVerificationController::class, 'download']);
     });
 });

@@ -29,7 +29,7 @@ const scrollToBottom = (instant = false, force = false) => {
     if (!force && isUserScrolling.value) {
         return;
     }
-    
+
     nextTick(() => {
         if (messagesContainer.value) {
             // Only scroll if we're near the bottom or forced
@@ -49,7 +49,7 @@ const ensureScrollToBottom = (instant = false, retries = 5, force = false) => {
     if (!force && isUserScrolling.value) {
         return false;
     }
-    
+
     if (messagesContainer.value) {
         // Ensure container has content before scrolling
         const container = messagesContainer.value;
@@ -61,7 +61,7 @@ const ensureScrollToBottom = (instant = false, retries = 5, force = false) => {
             }
         }
     }
-    
+
     if (retries > 0) {
         // Retry if container is not ready yet
         setTimeout(() => ensureScrollToBottom(instant, retries - 1, force), 50);
@@ -81,6 +81,19 @@ const saveMessagesToStorage = () => {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(messagesToSave));
     } catch (e) {
         console.error('Failed to save messages to localStorage:', e);
+    }
+};
+
+const clearChatHistory = () => {
+    if (confirm('Are you sure you want to clear all chat history?')) {
+        messages.value = [];
+        try {
+            localStorage.removeItem(STORAGE_KEY);
+        } catch (e) {
+            console.error('Failed to clear messages from localStorage:', e);
+        }
+        // Add welcome message
+        addMessage('Hello! I can help you verify email addresses.\n\nYou can:\n- Enter a single email\n- Paste multiple emails (one per line, comma, or semicolon separated)\n- Upload a CSV/TXT file using the 📎 button', 'assistant');
     }
 };
 
@@ -123,14 +136,14 @@ const loadMessagesFromStorage = () => {
             });
             messages.value = parsedMessages;
             saveMessagesToStorage(); // Save updated messages
-            
+
             // Start polling for messages with bulkJobId that are not completed
             parsedMessages.forEach(msg => {
                 if (msg.bulkJobId && !msg.showSummary) {
                     startPollingForBulkJob(msg.bulkJobId, msg.id);
                 }
             });
-            
+
             // Scroll to bottom immediately after loading messages (instant, no animation)
             // Use ensureScrollToBottom which retries if container isn't ready
             setTimeout(() => ensureScrollToBottom(true), 50);
@@ -144,23 +157,23 @@ const loadMessagesFromStorage = () => {
 const startPollingForBulkJob = (bulkJobId, messageId) => {
     // Stop existing polling for this job if any
     stopPollingForBulkJob(bulkJobId);
-    
+
     const poll = async () => {
         try {
             const response = await window.axios.get(`/api/bulk-jobs/${bulkJobId}`, {
                 withCredentials: true,
             });
-            
+
             const bulkJob = response.data.bulk_job;
             const stats = response.data.stats;
-            
+
             // Find the message
             const message = messages.value.find(m => m.id === messageId);
             if (!message) {
                 stopPollingForBulkJob(bulkJobId);
                 return;
             }
-            
+
             // Update message with latest data
             if (bulkJob.status === 'completed' || bulkJob.status === 'failed') {
                 // Job completed, stop polling and show summary
@@ -173,31 +186,24 @@ const startPollingForBulkJob = (bulkJobId, messageId) => {
                     risky: stats.risky,
                 };
                 message.content = `Verification completed: ${stats.valid} valid, ${stats.invalid} invalid, ${stats.risky} risky`;
-                stopPollingForBulkJob(bulkJobId);
-                saveMessagesToStorage();
-            } else {
-                // Job still processing, update progress
-                // Use stats.total instead of processed_emails as it's more accurate
-                const processedCount = stats.total || bulkJob.processed_emails || 0;
-                message.content = `Processing ${processedCount}/${bulkJob.total_emails} emails (${stats.valid} valid, ${stats.invalid} invalid, ${stats.risky} risky)`;
-                
-                // Load new emails if available
+
+                // Load final emails list when completed
                 try {
                     const emailsResponse = await window.axios.get(`/api/bulk-jobs/${bulkJobId}/emails`, {
                         params: { page: 1, per_page: 100 },
                         withCredentials: true,
                     });
-                    
+
                     const newEmails = emailsResponse.data.data || [];
-                    
+
                     // Update or add emails to message
                     if (!message.emails) {
                         message.emails = [];
                     }
-                    
+
                     // Create a map of existing emails
                     const existingEmailsMap = new Map(message.emails.map(e => [e.email, e]));
-                    
+
                     // Add or update emails
                     newEmails.forEach(emailData => {
                         if (existingEmailsMap.has(emailData.email)) {
@@ -205,7 +211,7 @@ const startPollingForBulkJob = (bulkJobId, messageId) => {
                             const existing = existingEmailsMap.get(emailData.email);
                             existing.status = 'complete';
                             existing.result = {
-                                status: emailData.status,
+                                status: emailData.state || emailData.result,
                                 score: emailData.score,
                                 ai_confidence: emailData.ai_confidence,
                                 ai_insights: emailData.ai_insights,
@@ -217,17 +223,75 @@ const startPollingForBulkJob = (bulkJobId, messageId) => {
                                 index: message.emails.length + 1,
                                 status: 'complete',
                                 result: {
-                                    status: emailData.status,
+                                    status: emailData.state || emailData.result,
                                     score: emailData.score,
                                     ai_confidence: emailData.ai_confidence,
                                     ai_insights: emailData.ai_insights,
                                 },
-                                currentStep: `Completed: ${emailData.status}`,
+                                currentStep: `Completed: ${emailData.state || emailData.result}`,
                                 steps: [],
                             });
                         }
                     });
-                    
+                } catch (emailError) {
+                    console.error('Failed to load final emails:', emailError);
+                }
+
+                stopPollingForBulkJob(bulkJobId);
+                saveMessagesToStorage();
+            } else {
+                // Job still processing, update progress
+                // Use stats.total instead of processed_emails as it's more accurate
+                const processedCount = stats.total || bulkJob.processed_emails || 0;
+                message.content = `Processing ${processedCount}/${bulkJob.total_emails} emails (${stats.valid} valid, ${stats.invalid} invalid, ${stats.risky} risky)`;
+
+                // Load new emails if available
+                try {
+                    const emailsResponse = await window.axios.get(`/api/bulk-jobs/${bulkJobId}/emails`, {
+                        params: { page: 1, per_page: 100 },
+                        withCredentials: true,
+                    });
+
+                    const newEmails = emailsResponse.data.data || [];
+
+                    // Update or add emails to message
+                    if (!message.emails) {
+                        message.emails = [];
+                    }
+
+                    // Create a map of existing emails
+                    const existingEmailsMap = new Map(message.emails.map(e => [e.email, e]));
+
+                    // Add or update emails
+                    newEmails.forEach(emailData => {
+                        if (existingEmailsMap.has(emailData.email)) {
+                            // Update existing email
+                            const existing = existingEmailsMap.get(emailData.email);
+                            existing.status = 'complete';
+                            existing.result = {
+                                status: emailData.state || emailData.result,
+                                score: emailData.score,
+                                ai_confidence: emailData.ai_confidence,
+                                ai_insights: emailData.ai_insights,
+                            };
+                        } else {
+                            // Add new email
+                            message.emails.push({
+                                email: emailData.email,
+                                index: message.emails.length + 1,
+                                status: 'complete',
+                                result: {
+                                    status: emailData.state || emailData.result,
+                                    score: emailData.score,
+                                    ai_confidence: emailData.ai_confidence,
+                                    ai_insights: emailData.ai_insights,
+                                },
+                                currentStep: `Completed: ${emailData.state || emailData.result}`,
+                                steps: [],
+                            });
+                        }
+                    });
+
                     saveMessagesToStorage();
                 } catch (emailError) {
                     console.error('Failed to load emails:', emailError);
@@ -238,7 +302,7 @@ const startPollingForBulkJob = (bulkJobId, messageId) => {
             // Don't stop polling on error, just log it
         }
     };
-    
+
     // Poll immediately, then every 3 seconds
     poll();
     const intervalId = setInterval(poll, 3000);
@@ -690,15 +754,15 @@ watch(messages, () => {
 // Handle user scroll events
 const handleScroll = () => {
     if (!messagesContainer.value) return;
-    
+
     // Mark that user is scrolling
     isUserScrolling.value = true;
-    
+
     // Clear existing timeout
     if (userScrollTimeout.value) {
         clearTimeout(userScrollTimeout.value);
     }
-    
+
     // Reset user scrolling flag after user stops scrolling for 1 second
     userScrollTimeout.value = setTimeout(() => {
         isUserScrolling.value = false;
@@ -724,7 +788,7 @@ onMounted(() => {
     if (messages.value.length === 0) {
         addMessage('Hello! I can help you verify email addresses.\n\nYou can:\n- Enter a single email\n- Paste multiple emails (one per line, comma, or semicolon separated)\n- Upload a CSV/TXT file using the 📎 button', 'assistant');
     }
-    
+
     // Ensure scroll to bottom after component is fully mounted and messages are loaded
     scrollToBottomOnMount();
 });
@@ -737,7 +801,7 @@ onActivated(() => {
 onUnmounted(() => {
     // Stop all polling when component is unmounted
     stopAllPolling();
-    
+
     // Clear scroll timeout
     if (userScrollTimeout.value) {
         clearTimeout(userScrollTimeout.value);
@@ -750,295 +814,297 @@ onUnmounted(() => {
         <div class="flex flex-col h-[calc(100vh-3.5rem)]">
 
             <!-- Messages -->
-            <div ref="messagesContainer" @scroll="handleScroll" class="flex-1 overflow-y-auto px-4 py-6 space-y-4" style="scroll-behavior: auto;">
-                <div v-for="message in messages" :key="message.id" class="flex gap-4">
-                    <div v-if="message.type === 'user'" class="flex-1"></div>
+            <div ref="messagesContainer" @scroll="handleScroll" class="flex-1 overflow-y-auto px-4 py-6 space-y-4 " style="scroll-behavior: auto;">
+                <div class="max-w-[72rem] w-full mx-auto">
+                    <div v-for="message in messages" :key="message.id" class="flex gap-4">
+                        <div v-if="message.type === 'user'" class="flex-1"></div>
 
-                    <div
-                                :class="[
-                            'max-w-3xl rounded-lg px-4 py-3',
-                            message.type === 'user'
-                                ? 'bg-indigo-600 text-white ml-auto'
-                                : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border border-gray-200 dark:border-gray-700'
-                        ]"
-                    >
-                        <!-- User message -->
-                        <div v-if="message.type === 'user'" class="whitespace-pre-wrap">
-                            {{ message.content }}
-                        </div>
-
-                        <!-- Assistant message -->
-                        <div v-else class="space-y-2">
-                            <div class="flex items-start gap-2">
-                                <div class="flex-1">
-                                    <div class="whitespace-pre-wrap">{{ message.content }}</div>
-                                    <!-- Progress indicator for batch -->
-                                    <div v-if="message.isProcessing && message.emails && message.emails.length > 0" class="mt-2">
-                                        <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                                            <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                            </svg>
-                                            <span>Processing...</span>
-                                        </div>
-                                    </div>
-                                </div>
-                                <!-- Spinner for processing (single email) -->
-                                <div v-if="message.isProcessing && !message.emails" class="flex-shrink-0">
-                                    <svg class="animate-spin h-5 w-5 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                    </svg>
-                                </div>
+                        <div
+                                    :class="[
+                                'max-w-3xl rounded-lg px-4 py-3',
+                                message.type === 'user'
+                                    ? 'bg-indigo-600 text-white ml-auto'
+                                    : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border border-gray-200 dark:border-gray-700'
+                            ]"
+                        >
+                            <!-- User message -->
+                            <div v-if="message.type === 'user'" class="whitespace-pre-wrap">
+                                {{ message.content }}
                             </div>
 
-                            <!-- Steps (for single email) - show all steps with icons -->
-                            <div v-if="message.steps && message.steps.length > 0" class="mt-3 space-y-2 text-sm">
-                                <div
-                                    v-for="(step, idx) in message.steps"
-                                    :key="idx"
-                                    class="flex items-start gap-2 p-2 bg-gray-50 dark:bg-gray-900/50 rounded border border-gray-200 dark:border-gray-700"
-                                >
-                                    <div class="flex-shrink-0 mt-0.5">
-                                        <span v-if="step.message.includes('✅')" class="text-green-600">✅</span>
-                                        <span v-else-if="step.message.includes('❌')" class="text-red-600">❌</span>
-                                        <span v-else-if="step.message.includes('⚠️')" class="text-orange-600">⚠️</span>
-                                        <span v-else-if="step.message.includes('🔍')" class="text-blue-600">🔍</span>
-                                        <span v-else-if="step.message.includes('📧')" class="text-indigo-600">📧</span>
-                                        <span v-else-if="step.message.includes('🤖')" class="text-purple-600">🤖</span>
-                                        <span v-else-if="step.message.includes('🧠')" class="text-purple-600">🧠</span>
-                                        <span v-else-if="step.message.includes('⏳')" class="text-yellow-600">⏳</span>
-                                        <span v-else class="text-gray-400">•</span>
-                                    </div>
-                                    <div class="flex-1 text-gray-700 dark:text-gray-300">
-                                        {{ step.message }}
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Result (for single email) - Detailed view -->
-                            <div v-if="message.result" class="mt-3 space-y-3">
-                                <!-- Main Info Card -->
-                                <div class="p-4 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
-                                    <div class="flex items-center justify-between mb-3">
-                                        <h4 class="font-semibold text-base">{{ message.result.email }}</h4>
-                                        <span
-                                            :class="[
-                                                'px-3 py-1 text-sm font-semibold rounded-full',
-                                                message.result.status === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-                                                message.result.status === 'invalid' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
-                                                message.result.status === 'risky' ? 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200' :
-                                                'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
-                                            ]"
-                                        >
-                                            {{ message.result.status }}
-                                        </span>
-                                    </div>
-
-                                    <div class="grid grid-cols-2 gap-3 mb-3">
-                                        <div>
-                                            <div class="text-xs text-gray-500 dark:text-gray-400">Score</div>
-                                            <div class="text-lg font-semibold">{{ message.result.score }}/100</div>
-                                        </div>
-                                        <div v-if="message.result.ai_confidence !== null">
-                                            <div class="text-xs text-gray-500 dark:text-gray-400">AI Confidence</div>
-                                            <div class="text-lg font-semibold">{{ message.result.ai_confidence }}%</div>
-                                        </div>
-                                    </div>
-
-                                    <!-- Checks -->
-                                    <div class="border-t border-gray-200 dark:border-gray-700 pt-3 mt-3">
-                                        <div class="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">Verification Checks:</div>
-                                        <div class="grid grid-cols-2 gap-2 text-sm">
-                                            <div class="flex items-center gap-2">
-                                                <span :class="message.result.checks?.syntax ? 'text-green-600' : 'text-red-600'">
-                                                    {{ message.result.checks?.syntax ? '✅' : '❌' }}
-                                                </span>
-                                                <span>Syntax</span>
-                                            </div>
-                                            <div class="flex items-center gap-2">
-                                                <span :class="message.result.checks?.mx ? 'text-green-600' : 'text-red-600'">
-                                                    {{ message.result.checks?.mx ? '✅' : '❌' }}
-                                                </span>
-                                                <span>MX Records</span>
-                                            </div>
-                                            <div class="flex items-center gap-2">
-                                                <span :class="message.result.checks?.smtp ? 'text-green-600' : 'text-yellow-600'">
-                                                    {{ message.result.checks?.smtp ? '✅' : '⏳' }}
-                                                </span>
-                                                <span>SMTP</span>
-                                            </div>
-                                            <div class="flex items-center gap-2">
-                                                <span :class="!message.result.checks?.disposable ? 'text-green-600' : 'text-red-600'">
-                                                    {{ !message.result.checks?.disposable ? '✅' : '❌' }}
-                                                </span>
-                                                <span>Disposable</span>
-                                            </div>
-                                            <div class="flex items-center gap-2">
-                                                <span :class="!message.result.checks?.role ? 'text-green-600' : 'text-orange-600'">
-                                                    {{ !message.result.checks?.role ? '✅' : '⚠️' }}
-                                                </span>
-                                                <span>Role-based</span>
-                                            </div>
-                                            <div class="flex items-center gap-2" v-if="message.result.checks?.ai_analysis">
-                                                <span class="text-purple-600">✅</span>
-                                                <span>AI Analysis</span>
+                            <!-- Assistant message -->
+                            <div v-else class="space-y-2">
+                                <div class="flex items-start gap-2">
+                                    <div class="flex-1">
+                                        <div class="whitespace-pre-wrap">{{ message.content }}</div>
+                                        <!-- Progress indicator for batch -->
+                                        <div v-if="message.isProcessing && message.emails && message.emails.length > 0" class="mt-2">
+                                            <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                                                <svg class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                </svg>
+                                                <span>Processing...</span>
                                             </div>
                                         </div>
                                     </div>
-                                </div>
-
-                                <!-- AI Insights Card -->
-                                <div v-if="message.result.ai_insights || message.result.ai_confidence !== null" class="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
-                                    <div class="flex items-center gap-2 mb-2">
-                                        <span class="text-purple-600">🤖</span>
-                                        <h5 class="font-semibold text-sm text-purple-900 dark:text-purple-200">AI Analysis</h5>
-                                    </div>
-                                    <div v-if="message.result.ai_insights" class="text-sm text-purple-800 dark:text-purple-300 mb-2">
-                                        {{ message.result.ai_insights }}
-                                    </div>
-                                    <div v-if="message.result.ai_confidence !== null" class="text-xs text-purple-600 dark:text-purple-400">
-                                        Confidence: {{ message.result.ai_confidence }}%
-                                    </div>
-                                </div>
-
-                                <!-- Error if any -->
-                                <div v-if="message.result.error" class="p-3 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-800">
-                                    <div class="text-sm text-red-800 dark:text-red-200">
-                                        <strong>Error:</strong> {{ message.result.error }}
-                                    </div>
-                                </div>
-                            </div>
-
-                            <!-- Link to bulk verification detail page (shown during processing or after refresh) -->
-                            <div v-if="message.bulkJobId" class="mt-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-                                <div class="flex items-center justify-between">
-                                    <div class="flex items-center gap-2">
-                                        <svg v-if="message.isProcessing" class="w-5 h-5 text-blue-600 dark:text-blue-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                                    <!-- Spinner for processing (single email) -->
+                                    <div v-if="message.isProcessing && !message.emails" class="flex-shrink-0">
+                                        <svg class="animate-spin h-5 w-5 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                                             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                                         </svg>
-                                        <svg v-else class="w-5 h-5 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                                        </svg>
-                                        <span class="text-sm text-blue-900 dark:text-blue-200">
-                                            {{ message.isProcessing ? 'Verification in progress...' : 'View live progress in detail page' }}
-                                        </span>
-                                    </div>
-                                    <button
-                                        @click="router.visit(`/verifications/bulk/${message.bulkJobId}`)"
-                                        class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium text-sm"
-                                    >
-                                        View Details →
-                                    </button>
-                                </div>
-                            </div>
-
-                            <!-- Batch results - Real-time progress view -->
-                            <div v-if="message.emails && message.emails.length > 0 && !message.showSummary" class="mt-3 space-y-2">
-                                <!-- Progress bar -->
-                                <div class="mb-3">
-                                    <div class="flex justify-between text-xs text-gray-600 dark:text-gray-400 mb-1">
-                                        <span>Progress</span>
-                                        <span>
-                                            {{ message.emails.filter(e => e.status === 'complete').length }} / {{ message.emails.length }} completed
-                                        </span>
-                                    </div>
-                                    <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                                        <div
-                                            class="bg-indigo-600 h-2 rounded-full transition-all duration-300"
-                                            :style="`width: ${(message.emails.filter(e => e.status === 'complete').length / message.emails.length) * 100}%`"
-                                        ></div>
                                     </div>
                                 </div>
 
-                                <!-- Email list with real-time status -->
-                                <div class="max-h-96 overflow-y-auto space-y-2">
+                                <!-- Steps (for single email) - show all steps with icons -->
+                                <div v-if="message.steps && message.steps.length > 0" class="mt-3 space-y-2 text-sm">
                                     <div
-                                        v-for="emailItem in message.emails"
-                                        :key="emailItem.email"
-                                        class="p-3 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700"
+                                        v-for="(step, idx) in message.steps"
+                                        :key="idx"
+                                        class="flex items-start gap-2 p-2 bg-gray-50 dark:bg-gray-900/50 rounded border border-gray-200 dark:border-gray-700"
                                     >
-                                        <div class="flex items-start justify-between gap-2">
-                                            <div class="flex-1 min-w-0">
-                                                <div class="font-medium text-sm truncate">{{ emailItem.email }}</div>
-                                                <!-- Current step indicator -->
-                                                <div v-if="emailItem.status === 'processing'" class="mt-1 text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1">
-                                                    <svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                                    </svg>
-                                                    <span class="truncate">{{ emailItem.currentStep || 'Processing...' }}</span>
+                                        <div class="flex-shrink-0 mt-0.5">
+                                            <span v-if="step.message.includes('✅')" class="text-green-600">✅</span>
+                                            <span v-else-if="step.message.includes('❌')" class="text-red-600">❌</span>
+                                            <span v-else-if="step.message.includes('⚠️')" class="text-orange-600">⚠️</span>
+                                            <span v-else-if="step.message.includes('🔍')" class="text-blue-600">🔍</span>
+                                            <span v-else-if="step.message.includes('📧')" class="text-indigo-600">📧</span>
+                                            <span v-else-if="step.message.includes('🤖')" class="text-purple-600">🤖</span>
+                                            <span v-else-if="step.message.includes('🧠')" class="text-purple-600">🧠</span>
+                                            <span v-else-if="step.message.includes('⏳')" class="text-yellow-600">⏳</span>
+                                            <span v-else class="text-gray-400">•</span>
+                                        </div>
+                                        <div class="flex-1 text-gray-700 dark:text-gray-300">
+                                            {{ step.message }}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Result (for single email) - Detailed view -->
+                                <div v-if="message.result" class="mt-3 space-y-3">
+                                    <!-- Main Info Card -->
+                                    <div class="p-4 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
+                                        <div class="flex items-center justify-between mb-3">
+                                            <h4 class="font-semibold text-base">{{ message.result.email }}</h4>
+                                            <span
+                                                :class="[
+                                                    'px-3 py-1 text-sm font-semibold rounded-full',
+                                                    message.result.status === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                                                    message.result.status === 'invalid' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                                                    message.result.status === 'risky' ? 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200' :
+                                                    'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
+                                                ]"
+                                            >
+                                                {{ message.result.status }}
+                                            </span>
+                                        </div>
+
+                                        <div class="grid grid-cols-2 gap-3 mb-3">
+                                            <div>
+                                                <div class="text-xs text-gray-500 dark:text-gray-400">Score</div>
+                                                <div class="text-lg font-semibold">{{ message.result.score }}/100</div>
+                                            </div>
+                                            <div v-if="message.result.ai_confidence !== null">
+                                                <div class="text-xs text-gray-500 dark:text-gray-400">AI Confidence</div>
+                                                <div class="text-lg font-semibold">{{ message.result.ai_confidence }}%</div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Checks -->
+                                        <div class="border-t border-gray-200 dark:border-gray-700 pt-3 mt-3">
+                                            <div class="text-xs font-semibold text-gray-700 dark:text-gray-300 mb-2">Verification Checks:</div>
+                                            <div class="grid grid-cols-2 gap-2 text-sm">
+                                                <div class="flex items-center gap-2">
+                                                    <span :class="message.result.checks?.syntax ? 'text-green-600' : 'text-red-600'">
+                                                        {{ message.result.checks?.syntax ? '✅' : '❌' }}
+                                                    </span>
+                                                    <span>Syntax</span>
                                                 </div>
-                                                <!-- Quick result preview -->
-                                                <div v-else-if="emailItem.result" class="mt-1 flex items-center gap-2 text-xs">
-                                                    <span
-                                                        :class="[
-                                                            'px-2 py-0.5 rounded font-semibold',
-                                                            emailItem.result.status === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-                                                            emailItem.result.status === 'invalid' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
-                                                            'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200'
-                                                        ]"
-                                                    >
-                                                        {{ emailItem.result.status }}
+                                                <div class="flex items-center gap-2">
+                                                    <span :class="message.result.checks?.mx ? 'text-green-600' : 'text-red-600'">
+                                                        {{ message.result.checks?.mx ? '✅' : '❌' }}
                                                     </span>
-                                                    <span class="text-gray-500">Score: {{ emailItem.result.score }}/100</span>
-                                                    <span v-if="emailItem.result.ai_confidence !== null" class="text-purple-600">
-                                                        AI: {{ emailItem.result.ai_confidence }}%
+                                                    <span>MX Records</span>
+                                                </div>
+                                                <div class="flex items-center gap-2">
+                                                    <span :class="message.result.checks?.smtp ? 'text-green-600' : 'text-yellow-600'">
+                                                        {{ message.result.checks?.smtp ? '✅' : '⏳' }}
                                                     </span>
+                                                    <span>SMTP</span>
+                                                </div>
+                                                <div class="flex items-center gap-2">
+                                                    <span :class="!message.result.checks?.disposable ? 'text-green-600' : 'text-red-600'">
+                                                        {{ !message.result.checks?.disposable ? '✅' : '❌' }}
+                                                    </span>
+                                                    <span>Disposable</span>
+                                                </div>
+                                                <div class="flex items-center gap-2">
+                                                    <span :class="!message.result.checks?.role ? 'text-green-600' : 'text-orange-600'">
+                                                        {{ !message.result.checks?.role ? '✅' : '⚠️' }}
+                                                    </span>
+                                                    <span>Role-based</span>
+                                                </div>
+                                                <div class="flex items-center gap-2" v-if="message.result.checks?.ai_analysis">
+                                                    <span class="text-purple-600">✅</span>
+                                                    <span>AI Analysis</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- AI Insights Card -->
+                                    <div v-if="message.result.ai_insights || message.result.ai_confidence !== null" class="p-4 bg-purple-50 dark:bg-purple-900/20 rounded-lg border border-purple-200 dark:border-purple-800">
+                                        <div class="flex items-center gap-2 mb-2">
+                                            <span class="text-purple-600">🤖</span>
+                                            <h5 class="font-semibold text-sm text-purple-900 dark:text-purple-200">AI Analysis</h5>
+                                        </div>
+                                        <div v-if="message.result.ai_insights" class="text-sm text-purple-800 dark:text-purple-300 mb-2">
+                                            {{ message.result.ai_insights }}
+                                        </div>
+                                        <div v-if="message.result.ai_confidence !== null" class="text-xs text-purple-600 dark:text-purple-400">
+                                            Confidence: {{ message.result.ai_confidence }}%
+                                        </div>
+                                    </div>
+
+                                    <!-- Error if any -->
+                                    <div v-if="message.result.error" class="p-3 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-800">
+                                        <div class="text-sm text-red-800 dark:text-red-200">
+                                            <strong>Error:</strong> {{ message.result.error }}
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Link to bulk verification detail page (shown during processing or after refresh) -->
+                                <div v-if="message.bulkJobId" class="mt-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex items-center gap-2">
+                                            <svg v-if="message.isProcessing" class="w-5 h-5 text-blue-600 dark:text-blue-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                            </svg>
+                                            <svg v-else class="w-5 h-5 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                            </svg>
+                                            <span class="text-sm text-blue-900 dark:text-blue-200">
+                                                {{ message.isProcessing ? 'Verification in progress...' : 'View live progress in detail page' }}
+                                            </span>
+                                        </div>
+                                        <button
+                                            @click="router.visit(`/verifications/bulk/${message.bulkJobId}`)"
+                                            class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium text-sm"
+                                        >
+                                            View Details →
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <!-- Batch results - Real-time progress view (show always if emails exist) -->
+                                <div v-if="message.emails && message.emails.length > 0" class="mt-3 space-y-2">
+                                    <!-- Progress bar -->
+                                    <div class="mb-3">
+                                        <div class="flex justify-between text-xs text-gray-600 dark:text-gray-400 mb-1">
+                                            <span>Progress</span>
+                                            <span>
+                                                {{ message.emails.filter(e => e.status === 'complete').length }} / {{ message.emails.length }} completed
+                                            </span>
+                                        </div>
+                                        <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                                            <div
+                                                class="bg-indigo-600 h-2 rounded-full transition-all duration-300"
+                                                :style="`width: ${(message.emails.filter(e => e.status === 'complete').length / message.emails.length) * 100}%`"
+                                            ></div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Email list with real-time status -->
+                                    <div class="max-h-96 overflow-y-auto space-y-2">
+                                        <div
+                                            v-for="emailItem in message.emails"
+                                            :key="emailItem.email"
+                                            class="p-3 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700"
+                                        >
+                                            <div class="flex items-start justify-between gap-2">
+                                                <div class="flex-1 min-w-0">
+                                                    <div class="font-medium text-sm truncate">{{ emailItem.email }}</div>
+                                                    <!-- Current step indicator -->
+                                                    <div v-if="emailItem.status === 'processing'" class="mt-1 text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1">
+                                                        <svg class="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                                        </svg>
+                                                        <span class="truncate">{{ emailItem.currentStep || 'Processing...' }}</span>
+                                                    </div>
+                                                    <!-- Quick result preview -->
+                                                    <div v-else-if="emailItem.result" class="mt-1 flex items-center gap-2 text-xs">
+                                                        <span
+                                                            :class="[
+                                                                'px-2 py-0.5 rounded font-semibold',
+                                                                emailItem.result.status === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                                                                emailItem.result.status === 'invalid' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                                                                'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200'
+                                                            ]"
+                                                        >
+                                                            {{ emailItem.result.status }}
+                                                        </span>
+                                                        <span class="text-gray-500">Score: {{ emailItem.result.score }}/100</span>
+                                                        <span v-if="emailItem.result.ai_confidence !== null" class="text-purple-600">
+                                                            AI: {{ emailItem.result.ai_confidence }}%
+                                                        </span>
+                                                    </div>
                                                 </div>
                                             </div>
                                         </div>
                                     </div>
                                 </div>
-                            </div>
 
-                            <!-- Batch summary (after completion) -->
-                            <div v-if="message.showSummary && message.summary" class="mt-3 p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg border border-indigo-200 dark:border-indigo-800">
-                                <div class="flex items-center justify-between mb-3">
-                                    <h4 class="font-semibold text-indigo-900 dark:text-indigo-200">Verification Summary</h4>
-                                    <span class="text-2xl">✅</span>
-                                </div>
+                                <!-- Batch summary (after completion) - show below email list -->
+                                <div v-if="message.showSummary && message.summary" class="mt-4 p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg border border-indigo-200 dark:border-indigo-800">
+                                    <div class="flex items-center justify-between mb-3">
+                                        <h4 class="font-semibold text-indigo-900 dark:text-indigo-200">Verification Summary</h4>
+                                        <span class="text-2xl">✅</span>
+                                    </div>
 
-                                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
-                                    <div class="text-center">
-                                        <div class="text-2xl font-bold text-gray-900 dark:text-gray-100">{{ message.summary.total }}</div>
-                                        <div class="text-xs text-gray-600 dark:text-gray-400">Total</div>
+                                    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+                                        <div class="text-center">
+                                            <div class="text-2xl font-bold text-gray-900 dark:text-gray-100">{{ message.summary.total }}</div>
+                                            <div class="text-xs text-gray-600 dark:text-gray-400">Total</div>
+                                        </div>
+                                        <div class="text-center">
+                                            <div class="text-2xl font-bold text-green-600">{{ message.summary.valid }}</div>
+                                            <div class="text-xs text-gray-600 dark:text-gray-400">Valid</div>
+                                        </div>
+                                        <div class="text-center">
+                                            <div class="text-2xl font-bold text-red-600">{{ message.summary.invalid }}</div>
+                                            <div class="text-xs text-gray-600 dark:text-gray-400">Invalid</div>
+                                        </div>
+                                        <div class="text-center">
+                                            <div class="text-2xl font-bold text-orange-600">{{ message.summary.risky }}</div>
+                                            <div class="text-xs text-gray-600 dark:text-gray-400">Risky</div>
+                                        </div>
                                     </div>
-                                    <div class="text-center">
-                                        <div class="text-2xl font-bold text-green-600">{{ message.summary.valid }}</div>
-                                        <div class="text-xs text-gray-600 dark:text-gray-400">Valid</div>
-                                    </div>
-                                    <div class="text-center">
-                                        <div class="text-2xl font-bold text-red-600">{{ message.summary.invalid }}</div>
-                                        <div class="text-xs text-gray-600 dark:text-gray-400">Invalid</div>
-                                    </div>
-                                    <div class="text-center">
-                                        <div class="text-2xl font-bold text-orange-600">{{ message.summary.risky }}</div>
-                                        <div class="text-xs text-gray-600 dark:text-gray-400">Risky</div>
-                                    </div>
-                                </div>
 
-                                <div v-if="message.bulkJobId" class="pt-3 border-t border-indigo-200 dark:border-indigo-800">
-                                    <button
-                                        @click="router.visit(`/verifications/bulk/${message.bulkJobId}`)"
-                                        class="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-medium"
-                                    >
-                                        View Full Report →
-                                    </button>
+                                    <div v-if="message.bulkJobId" class="pt-3 border-t border-indigo-200 dark:border-indigo-800">
+                                        <button
+                                            @click="router.visit(`/verifications/bulk/${message.bulkJobId}`)"
+                                            class="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-medium"
+                                        >
+                                            View Full Report →
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
+
+                        <div v-if="message.type !== 'user'" class="flex-1"></div>
                     </div>
 
-                    <div v-if="message.type !== 'user'" class="flex-1"></div>
+                    <div ref="messagesEnd"></div>
                 </div>
-
-                <div ref="messagesEnd"></div>
-                        </div>
+            </div>
 
             <!-- Input area -->
-            <div class="border-t border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-4">
+            <div class="bg-white dark:bg-gray-800 px-4 py-4">
                 <div class="max-w-4xl mx-auto">
                     <div class="flex gap-2 items-end">
                         <!-- File upload button -->
@@ -1073,10 +1139,21 @@ onUnmounted(() => {
                         <button
                             @click="verifyEmail"
                             :disabled="isProcessing || !input.trim()"
-                            class="px-6 py-3 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                            class="px-4 py-3 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
                         >
                             <span v-if="isProcessing">Processing...</span>
                             <span v-else>Send</span>
+                        </button>
+
+                        <!-- Clean button -->
+                        <button
+                            type="button"
+                            @click="clearChatHistory"
+                            :disabled="isProcessing"
+                            class="px-4 py-3 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                            title="Clear chat history"
+                        >
+                            Clear
                         </button>
                     </div>
                     <p class="mt-2 text-xs text-gray-500 dark:text-gray-400 text-center">
