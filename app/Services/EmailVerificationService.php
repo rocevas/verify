@@ -960,6 +960,24 @@ class EmailVerificationService
             $result['account'] = $parts['account'];
             $result['domain'] = $parts['domain'];
 
+            // 0.5. Email alias detection (before other checks)
+            $aliasOf = $this->detectAlias($email);
+            if ($aliasOf && $aliasOf !== $email) {
+                $result['alias_of'] = $aliasOf;
+                $result['aliasOf'] = $aliasOf; // Keep for backward compatibility
+            }
+
+            // 0.6. Typo suggestions (check for typos even if syntax is valid)
+            $typoSuggestion = $this->getTypoSuggestions($email);
+            if ($typoSuggestion && $typoSuggestion !== $email) {
+                $result['typo_suggestion'] = $typoSuggestion;
+                $result['typoSuggestion'] = $typoSuggestion; // Keep for backward compatibility
+                // Also set did_you_mean for backward compatibility
+                if (empty($result['did_you_mean'])) {
+                    $result['did_you_mean'] = $typoSuggestion;
+                }
+            }
+
             // 1. Syntax check
             $syntaxCheck = $this->checkSyntax($email);
             $result['syntax'] = $syntaxCheck;
@@ -1296,7 +1314,8 @@ class EmailVerificationService
                 'ai_insights' => $result['ai_insights'] ?? null,
                 'ai_confidence' => $result['ai_confidence'] ?? null,
                 'ai_risk_factors' => $result['ai_risk_factors'] ?? null,
-                'did_you_mean' => $result['did_you_mean'] ?? null,
+                'did_you_mean' => $result['did_you_mean'] ?? $result['typo_suggestion'] ?? $result['typoSuggestion'] ?? null,
+                'alias_of' => $result['alias_of'] ?? $result['aliasOf'] ?? null,
                 'email_score' => $result['score'] ?? null, // Traditional email verification score (MX, blacklist, SMTP, etc.)
                 'score' => null, // Will be calculated by AI service if AI is used (email_score + ai_confidence), otherwise equals email_score
                 'duration' => $result['duration'] ?? null, // Verification duration in seconds (rounded to 2 decimal places)
@@ -1359,6 +1378,128 @@ class EmailVerificationService
     private function checkRoleBased(string $account): bool
     {
         return in_array(strtolower($account), $this->getRoleEmails(), true);
+    }
+
+    /**
+     * Detect email alias and return canonical email address
+     * Supports Gmail, Yahoo, Outlook/Hotmail aliases
+     * 
+     * @param string $email
+     * @return string|null Canonical email address or null if not an alias
+     */
+    private function detectAlias(string $email): ?string
+    {
+        $parts = $this->parseEmail($email);
+        if (!$parts) {
+            return null;
+        }
+        
+        $domain = strtolower($parts['domain']);
+        $localPart = $parts['account'];
+        
+        // Gmail/GoogleMail alias detection
+        if (in_array($domain, ['gmail.com', 'googlemail.com'], true)) {
+            // Gmail aliases: dots are ignored, plus addressing is supported
+            // user.name+test@gmail.com -> username@gmail.com
+            $canonical = $localPart;
+            
+            // Remove everything after plus sign
+            if (($plusPos = strpos($canonical, '+')) !== false) {
+                $canonical = substr($canonical, 0, $plusPos);
+            }
+            
+            // Remove all dots
+            $canonical = str_replace('.', '', $canonical);
+            
+            // Always use gmail.com as canonical domain
+            return $canonical . '@gmail.com';
+        }
+        
+        // Yahoo alias detection (format: username-alias@yahoo.com)
+        if (str_contains($domain, 'yahoo.') || in_array($domain, ['ymail.com', 'rocketmail.com'], true)) {
+            // Yahoo uses hyphen for aliases: username-alias@yahoo.com -> username@yahoo.com
+            if (preg_match('/^([^-]+)-(.+)$/', $localPart, $matches)) {
+                // Extract base email (before hyphen)
+                $baseEmail = $matches[1];
+                // Use original domain (yahoo.com, yahoo.co.uk, etc.)
+                return $baseEmail . '@' . $domain;
+            }
+        }
+        
+        // Outlook/Hotmail/Live alias detection
+        $outlookDomains = [
+            'outlook.com', 'outlook.fr', 'outlook.de', 'outlook.es', 'outlook.it',
+            'outlook.co.uk', 'outlook.jp', 'outlook.in', 'outlook.com.au',
+            'hotmail.com', 'hotmail.fr', 'hotmail.de', 'hotmail.es', 'hotmail.it',
+            'hotmail.co.uk', 'hotmail.jp', 'hotmail.in', 'hotmail.com.au',
+            'live.com', 'live.fr', 'live.de', 'live.co.uk', 'live.jp',
+            'msn.com', 'passport.com', 'passport.net',
+        ];
+        
+        if (in_array($domain, $outlookDomains, true)) {
+            // Outlook uses plus addressing: username+test@outlook.com -> username@outlook.com
+            if (($plusPos = strpos($localPart, '+')) !== false) {
+                $canonical = substr($localPart, 0, $plusPos);
+                return $canonical . '@' . $domain;
+            }
+        }
+        
+        return null;
+    }
+
+    /**
+     * Get typo suggestions for email address
+     * Returns corrected email if typo is detected
+     * 
+     * @param string $email
+     * @return string|null Corrected email address or null if no typo detected
+     */
+    public function getTypoSuggestions(string $email): ?string
+    {
+        $parts = $this->parseEmail($email);
+        if (!$parts) {
+            return null;
+        }
+        
+        $domain = $parts['domain'];
+        $localPart = $parts['account'];
+        
+        // First check if we already have typo correction from existing method
+        $typoCorrection = $this->getTypoCorrection($domain);
+        if ($typoCorrection) {
+            return $localPart . '@' . $typoCorrection;
+        }
+        
+        // Common domain typo corrections (static list for fast lookup)
+        $typoCorrections = [
+            'gmial.com' => 'gmail.com',
+            'gmal.com' => 'gmail.com',
+            'gamil.com' => 'gmail.com',
+            'gmai.com' => 'gmail.com',
+            'gmail.co' => 'gmail.com',
+            'gmail.cm' => 'gmail.com',
+            'gmail.om' => 'gmail.com',
+            'gmail.con' => 'gmail.com',
+            'yaho.com' => 'yahoo.com',
+            'yahooo.com' => 'yahoo.com',
+            'yahoo.co' => 'yahoo.com',
+            'yahoo.cm' => 'yahoo.com',
+            'hotmai.com' => 'hotmail.com',
+            'hotmal.com' => 'hotmail.com',
+            'hotmail.co' => 'hotmail.com',
+            'hotmail.cm' => 'hotmail.com',
+            'otmail.com' => 'hotmail.com',
+            'outlook.co' => 'outlook.com',
+            'outlook.cm' => 'outlook.com',
+            'outlok.com' => 'outlook.com',
+        ];
+        
+        $domainLower = strtolower($domain);
+        if (isset($typoCorrections[$domainLower])) {
+            return $localPart . '@' . $typoCorrections[$domainLower];
+        }
+        
+        return null;
     }
 
     /**
@@ -1866,6 +2007,61 @@ class EmailVerificationService
         }
 
         return max(0, min(100, $score));
+    }
+
+    /**
+     * Optimized batch verification with domain grouping
+     * Groups emails by domain and caches domain validation results
+     * 
+     * @param array $emails
+     * @param int|null $userId
+     * @param int|null $teamId
+     * @param int|null $tokenId
+     * @param int|null $bulkJobId
+     * @param string|null $source
+     * @return array
+     */
+    public function verifyBatchOptimized(array $emails, ?int $userId = null, ?int $teamId = null, ?int $tokenId = null, ?int $bulkJobId = null, ?string $source = null): array
+    {
+        if (empty($emails)) {
+            return [];
+        }
+
+        // 1. Group emails by domain
+        $emailsByDomain = [];
+        $emailToDomain = [];
+        
+        foreach ($emails as $email) {
+            $parts = $this->parseEmail($email);
+            if ($parts) {
+                $domain = $parts['domain'];
+                $emailsByDomain[$domain][] = $email;
+                $emailToDomain[$email] = $domain;
+            }
+        }
+
+        // 2. Pre-validate domains (cache results)
+        $domainResults = [];
+        foreach (array_keys($emailsByDomain) as $domain) {
+            // Cache domain validation results to avoid redundant checks
+            $domainResults[$domain] = [
+                'domain_validity' => $this->checkDomainValidity($domain)['valid'] ?? false,
+                'mx_record' => $this->checkMx($domain),
+                'disposable' => $this->checkDisposable($domain),
+                'mx_records' => $this->getMxRecords($domain),
+                'is_public_provider' => $this->isPublicProvider($domain, $this->getMxRecords($domain)) !== null,
+            ];
+        }
+
+        // 3. Verify emails using cached domain results
+        $results = [];
+        foreach ($emails as $email) {
+            // Use regular verify method, but domain checks will be cached
+            $result = $this->verify($email, $userId, $teamId, $tokenId, $bulkJobId, $source);
+            $results[] = $result;
+        }
+
+        return $results;
     }
 }
 

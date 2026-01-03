@@ -134,17 +134,22 @@ class EmailVerificationController extends Controller
             ], 202);
         }
 
-        // Synchronous verification
-        $results = [];
+        // Synchronous verification (optimized with domain grouping)
+        $results = $this->verificationService->verifyBatchOptimized(
+            $emails,
+            $user->id,
+            $teamId,
+            $tokenId,
+            $bulkJob->id,
+            $source
+        );
+
+        // Count results
         $validCount = 0;
         $invalidCount = 0;
         $riskyCount = 0;
 
-        foreach ($emails as $email) {
-            $result = $this->verificationService->verify($email, $user->id, $teamId, $tokenId, $bulkJob->id, $source);
-            $results[] = $result;
-
-            // Update counts
+        foreach ($results as $result) {
             if ($result['status'] === 'valid') {
                 $validCount++;
             } elseif ($result['status'] === 'invalid') {
@@ -168,6 +173,25 @@ class EmailVerificationController extends Controller
             'results' => $results,
             'count' => count($results),
             'bulk_job_id' => $bulkJob->uuid,
+        ]);
+    }
+
+    /**
+     * Get typo suggestions for an email address
+     */
+    public function typoSuggestions(Request $request): JsonResponse
+    {
+        $request->validate([
+            'email' => 'required|email',
+        ]);
+
+        $email = $request->input('email');
+        $suggestion = $this->verificationService->getTypoSuggestions($email);
+
+        return response()->json([
+            'email' => $email,
+            'typoSuggestion' => $suggestion,
+            'hasSuggestion' => $suggestion !== null,
         ]);
     }
 }

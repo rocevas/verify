@@ -115,6 +115,8 @@ class EmailVerificationController extends Controller
                 'ai_confidence' => $verification->ai_confidence, // AI score
                 'score' => $verification->score, // Final score (email_score + ai_confidence if AI is used, otherwise email_score)
                 'checks' => $this->buildChecksArray($verification),
+                'aliasOf' => $verification->alias_of,
+                'typoSuggestion' => $verification->did_you_mean,
                 'source' => $verification->source,
                 'created_at' => $verification->created_at?->toIso8601String(),
             ];

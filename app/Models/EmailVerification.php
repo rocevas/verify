@@ -76,6 +76,7 @@ class EmailVerification extends Model
         'isp_esp',
         'government_tld',
         'did_you_mean',
+        'alias_of',
         'verified_at',
         'duration', // Verification duration in seconds (rounded to 2 decimal places)
     ];
