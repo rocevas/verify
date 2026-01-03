@@ -1182,22 +1182,23 @@ class EmailVerificationService
             $result['checks']['is_free'] = $result['is_free']; // Also add is_free for compatibility
             
             if ($publicProvider && ($publicProvider['skip_smtp'] ?? false)) {
-                // Skip SMTP check for public providers, but mark as valid if MX records exist
+                // Skip SMTP check for public providers
+                // Public providers (Gmail, Yahoo, etc.) are catch-all servers
                 if ($result['mx_record']) {
-                    $result['status'] = $publicProvider['status'] ?? 'valid';
-                    $result['smtp'] = false; // Not checked, but valid (public providers block SMTP checks)
+                    // Public providers are catch-all, so mark as catch_all status (not valid)
+                    // This matches the behavior for other catch-all servers
+                    $result['status'] = 'catch_all'; // Public providers are catch-all servers
+                    $result['smtp'] = false; // Not checked (public providers block SMTP checks)
                     $result['checks']['smtp'] = false; // Update checks array
                     $result['mailbox_full'] = false; // Not checked (public providers are assumed to have space)
                     $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
                     
                     // Calculate score with new system (without SMTP check)
-                    // Public providers get high score: syntax (20) + domain_validity (20) + mx_record (25) + disposable (10) = 75
-                    // Add bonus for being known public provider = 15 points
+                    // Public providers are catch-all, so they get base score without bonus
+                    // Base score: syntax (20) + domain_validity (20) + mx_record (20) + disposable (10) + role_bonus (10) = 80
+                    // Note: No bonus for catch-all servers since we can't verify if email actually exists
                     $result['score'] = $this->calculateScore($result['checks']);
-                    if ($result['score'] >= 70) {
-                        // Bonus for known public providers (they're trusted)
-                        $result['score'] = min(95, $result['score'] + 15);
-                    }
+                    // Catch-all servers don't get bonus - they're risky, not trusted
                     
                     $result['error'] = null; // Clear any errors
                     $this->addDuration($result, $startTime);
