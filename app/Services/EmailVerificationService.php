@@ -51,7 +51,7 @@ class EmailVerificationService
     {
         return config('email-verification.score_weights', [
             'syntax' => 10,
-            'mx' => 30,
+            'mx_record' => 30,
             'smtp' => 50,
             'disposable' => 10,
             'role_penalty' => 20,
@@ -927,7 +927,7 @@ class EmailVerificationService
                 'syntax' => false,
                 'blacklist' => false,
                 'domain_validity' => false,
-                'mx' => false,
+                'mx_record' => false,
                 'smtp' => false,
                 'disposable' => false,
                 'role' => false,
@@ -963,6 +963,7 @@ class EmailVerificationService
             // 1. Syntax check
             $syntaxCheck = $this->checkSyntax($email);
             $result['syntax'] = $syntaxCheck;
+            $result['checks']['syntax'] = $syntaxCheck; // Update checks array
             if (!$syntaxCheck) {
                 // Set free flag early (by domain name only)
                 $result['is_free'] = $this->isFreeEmailProviderByDomain($parts['domain']);
@@ -990,16 +991,19 @@ class EmailVerificationService
                 $result['error'] = str_replace([':reason', ':notes'], [$blacklist->reason, $notes], $errorTemplate);
                 $result['score'] = 0;
                 $result['blacklist'] = true;
+                $result['checks']['blacklist'] = true; // Update checks array
                 $this->addDuration($result, $startTime);
                 $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
             $result['blacklist'] = false;
+            $result['checks']['blacklist'] = false; // Update checks array
 
             // 2.5. No-reply keywords check (synthetic addresses / list poisoning)
             $noReplyCheck = $this->checkNoReply($parts['account']);
             $result['no_reply'] = $noReplyCheck;
+            $result['checks']['no_reply'] = $noReplyCheck; // Update checks array
             if ($noReplyCheck) {
                 $riskChecks = $this->getRiskChecks();
                 $result['status'] = $riskChecks['no_reply_status'] ?? 'do_not_mail';
@@ -1014,7 +1018,7 @@ class EmailVerificationService
             if ($riskChecks['enable_typo_check'] ?? true) {
                 $typoCheck = $this->checkTypoDomain($parts['domain']);
                 $result['typo_domain'] = $typoCheck;
-                $result['typo_domain'] = $typoCheck;
+                $result['checks']['typo_domain'] = $typoCheck; // Update checks array
                 if ($typoCheck) {
                     // Get the corrected domain
                     $correctedDomain = $this->getTypoCorrection($parts['domain']);
@@ -1035,6 +1039,7 @@ class EmailVerificationService
             // 2.7. ISP/ESP infrastructure domain check
             if ($riskChecks['enable_isp_esp_check'] ?? true) {
                 $result['isp_esp'] = $this->checkIspEspDomain($parts['domain']);
+                $result['checks']['isp_esp'] = $result['isp_esp']; // Update checks array
                 if ($result['isp_esp']) {
                     $result['status'] = $riskChecks['isp_esp_status'] ?? 'do_not_mail';
                     $result['score'] = 0;
@@ -1048,6 +1053,7 @@ class EmailVerificationService
             // 2.8. Government/registry TLD check
             if ($riskChecks['enable_government_check'] ?? true) {
                 $result['government_tld'] = $this->checkGovernmentTld($parts['domain']);
+                $result['checks']['government_tld'] = $result['government_tld']; // Update checks array
                 if ($result['government_tld']) {
                     $result['status'] = $riskChecks['government_tld_status'] ?? 'risky';
                     // Don't return early - just mark as risky and continue
@@ -1057,6 +1063,7 @@ class EmailVerificationService
             // 3. Disposable email check
             $disposableCheck = $this->checkDisposable($parts['domain']);
             $result['disposable'] = $disposableCheck;
+            $result['checks']['disposable'] = $disposableCheck; // Update checks array
             if ($disposableCheck) {
                 // Set free flag early (by domain name only)
                 $result['free'] = $this->isFreeEmailProviderByDomain($parts['domain']);
@@ -1081,6 +1088,7 @@ class EmailVerificationService
             // 3. Role-based email check
             $roleCheck = $this->checkRoleBased($parts['account']);
             $result['role'] = $roleCheck;
+            $result['checks']['role'] = $roleCheck; // Update checks array
             if ($roleCheck) {
                 $result['status'] = 'risky';
             }
@@ -1097,10 +1105,12 @@ class EmailVerificationService
                 return $result;
             }
             $result['domain_validity'] = true;
+            $result['checks']['domain_validity'] = true; // Update checks array
 
             // 4. MX check
             $mxCheck = $this->checkMx($parts['domain']);
             $result['mx_record'] = $mxCheck;
+            $result['checks']['mx_record'] = $mxCheck; // Update checks array
             if (!$mxCheck) {
                 $result['status'] = 'invalid';
                 $result['error'] = $this->getErrorMessages()['no_mx_records'];
@@ -1127,6 +1137,7 @@ class EmailVerificationService
                 if ($result['mx_record']) {
                     $result['status'] = $publicProvider['status'] ?? 'valid';
                     $result['smtp'] = false; // Not checked, but valid (public providers block SMTP checks)
+                    $result['checks']['smtp'] = false; // Update checks array
                     // For public providers, give full score since they're known valid providers
                     $result['score'] = 100; // Public providers are always valid if MX records exist
                     $result['error'] = null; // Clear any errors
@@ -1141,7 +1152,7 @@ class EmailVerificationService
             }
 
             // Calculate score before SMTP check (for faster response if SMTP fails)
-            $result['score'] = $this->calculateScore($result);
+            $result['score'] = $this->calculateScore($result['checks']);
 
             // 5. SMTP check (lėčiausias check, daromas paskutinis) - wrapped in try-catch to not fail entire verification
             // Only perform if enabled in config and rate limit allows
@@ -1152,13 +1163,15 @@ class EmailVerificationService
                         $smtpResult = $this->checkSmtpWithDetails($email, $parts['domain']);
                         $smtpCheck = $smtpResult['valid'];
                         $result['smtp'] = $smtpCheck;
+                        $result['checks']['smtp'] = $smtpCheck; // Update checks array
                         $result['mailbox_full'] = $smtpResult['mailbox_full'] ?? false;
                         
                         // Recalculate score after SMTP check
-                        $result['score'] = $this->calculateScore($result);
+                        $result['score'] = $this->calculateScore($result['checks']);
                     } else {
                         // Rate limit exceeded, skip SMTP check
                         $result['smtp'] = false;
+                        $result['checks']['smtp'] = false; // Update checks array
                         Log::info('SMTP check skipped due to rate limit', [
                             'email' => $email,
                             'domain' => $parts['domain'],
@@ -1171,9 +1184,11 @@ class EmailVerificationService
                         'error' => $e->getMessage(),
                     ]);
                     $result['smtp'] = false;
+                    $result['checks']['smtp'] = false; // Update checks array
                 }
             } else {
                 $result['smtp'] = false; // Not checked
+                $result['checks']['smtp'] = false; // Update checks array
             }
 
             // Catch-all detection (if enabled and SMTP check didn't pass)
@@ -1352,8 +1367,13 @@ class EmailVerificationService
         $ttl = config('email-verification.domain_validity_cache_ttl', 3600);
         
         return Cache::remember($cacheKey, $ttl, function () use ($domain) {
-            // 1. DNS Resolution Check (A record)
-            $resolvedIp = @gethostbyname($domain);
+            // Set DNS timeout to prevent hanging
+            $originalTimeout = ini_get('default_socket_timeout');
+            ini_set('default_socket_timeout', 3); // 3 seconds max for DNS
+            
+            try {
+                // 1. DNS Resolution Check (A record)
+                $resolvedIp = @gethostbyname($domain);
             if ($resolvedIp === $domain || !filter_var($resolvedIp, FILTER_VALIDATE_IP)) {
                 // Domain does not resolve to IP
                 return [
@@ -1405,7 +1425,11 @@ class EmailVerificationService
                 }
             }
             
-            return ['valid' => true];
+                return ['valid' => true];
+            } finally {
+                // Restore original timeout
+                ini_set('default_socket_timeout', $originalTimeout);
+            }
         });
     }
     
@@ -1511,15 +1535,24 @@ class EmailVerificationService
         $ttl = $this->getMxCacheTtl();
         
         return Cache::remember($cacheKey, $ttl, function () use ($domain) {
-            $mxRecords = [];
-            $result = getmxrr($domain, $mxRecords);
+            // Set DNS timeout to prevent hanging
+            $originalTimeout = ini_get('default_socket_timeout');
+            ini_set('default_socket_timeout', 3); // 3 seconds max for DNS
             
-            if (!$result && function_exists('dns_get_record')) {
-                $dnsRecords = dns_get_record($domain, DNS_MX);
-                $result = !empty($dnsRecords);
+            try {
+                $mxRecords = [];
+                $result = @getmxrr($domain, $mxRecords);
+                
+                if (!$result && function_exists('dns_get_record')) {
+                    $dnsRecords = @dns_get_record($domain, DNS_MX);
+                    $result = !empty($dnsRecords);
+                }
+                
+                return $result;
+            } finally {
+                // Restore original timeout
+                ini_set('default_socket_timeout', $originalTimeout);
             }
-            
-            return $result;
         });
     }
 
@@ -1798,25 +1831,25 @@ class EmailVerificationService
             return 0; // ISP/ESP domains = 0
         }
 
-        if ($checks['syntax']) {
+        if ($checks['syntax'] ?? false) {
             $score += $weights['syntax'] ?? 10;
         }
 
-        if ($checks['mx']) {
-            $score += $weights['mx'] ?? 30;
+        if ($checks['mx_record'] ?? false) {
+            $score += $weights['mx_record'] ?? 30;
         }
 
-        if ($checks['smtp']) {
+        if ($checks['smtp'] ?? false) {
             $score += $weights['smtp'] ?? 50;
         }
 
-        if (!$checks['disposable']) {
+        if (!($checks['disposable'] ?? false)) {
             $score += $weights['disposable'] ?? 10;
         } else {
             $score = 0; // Disposable emails get 0
         }
 
-        if ($checks['role']) {
+        if ($checks['role'] ?? false) {
             $score -= $weights['role_penalty'] ?? 20; // Penalty for role-based emails
         }
 

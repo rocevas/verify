@@ -68,10 +68,15 @@ class AiEmailVerificationService
             'checks' => [
                 'syntax' => false,
                 'blacklist' => false,
-                'mx' => false,
+                'domain_validity' => false,
+                'mx_record' => false,
                 'smtp' => false,
                 'disposable' => false,
                 'role' => false,
+                'no_reply' => false,
+                'typo_domain' => false,
+                'isp_esp' => false,
+                'government_tld' => false,
                 'ai_analysis' => false,
             ],
             'score' => 0,
@@ -111,6 +116,9 @@ class AiEmailVerificationService
         }
 
         // Run traditional checks with streaming support
+        // Set timeout for traditional verification
+        set_time_limit(90); // 90 seconds for traditional checks
+        
         $traditionalResult = $this->traditionalService->verify(
             $email,
             $userId,
@@ -159,6 +167,47 @@ class AiEmailVerificationService
 
         // Merge traditional results
         $result = array_merge($result, $traditionalResult);
+        
+        // Ensure checks array has all keys from traditional result
+        if (isset($traditionalResult['checks'])) {
+            $result['checks'] = array_merge($result['checks'] ?? [], $traditionalResult['checks']);
+        }
+        
+        // Ensure mx_record key is synced
+        if (isset($result['mx_record'])) {
+            $result['checks']['mx_record'] = $result['mx_record'];
+        }
+        if (isset($result['syntax'])) {
+            $result['checks']['syntax'] = $result['syntax'];
+        }
+        if (isset($result['smtp'])) {
+            $result['checks']['smtp'] = $result['smtp'];
+        }
+        if (isset($result['disposable'])) {
+            $result['checks']['disposable'] = $result['disposable'];
+        }
+        if (isset($result['role'])) {
+            $result['checks']['role'] = $result['role'];
+        }
+        if (isset($result['blacklist'])) {
+            $result['checks']['blacklist'] = $result['blacklist'];
+        }
+        if (isset($result['domain_validity'])) {
+            $result['checks']['domain_validity'] = $result['domain_validity'];
+        }
+        if (isset($result['no_reply'])) {
+            $result['checks']['no_reply'] = $result['no_reply'];
+        }
+        if (isset($result['typo_domain'])) {
+            $result['checks']['typo_domain'] = $result['typo_domain'];
+        }
+        if (isset($result['isp_esp'])) {
+            $result['checks']['isp_esp'] = $result['isp_esp'];
+        }
+        if (isset($result['government_tld'])) {
+            $result['checks']['government_tld'] = $result['government_tld'];
+        }
+        
         $result['ai_analysis'] = false;
 
         // Stream: Traditional checks complete
@@ -169,7 +218,7 @@ class AiEmailVerificationService
                 'step' => 'traditional_complete',
                 'data' => [
                     'syntax' => $result['syntax'] ?? false,
-                    'mx' => $result['mx_record'] ?? false,
+                    'mx_record' => $result['mx_record'] ?? false,
                     'smtp' => $result['smtp'] ?? false,
                     'score' => $result['score'],
                 ],
@@ -509,7 +558,7 @@ class AiEmailVerificationService
     {
         $systemPrompt = 'You are an expert email verification assistant. Analyze email addresses and provide insights about their validity, deliverability, and risk factors. Always respond in valid JSON format with the following structure: {"insights": "your analysis", "confidence": 0-100, "suggested_status": "valid|invalid|risky|catch_all|do_not_mail", "did_you_mean": "corrected_email_or_null", "risk_factors": []}.';
 
-        $response = Http::timeout(60) // Ollama can be slower
+        $response = Http::timeout(30) // Reduced from 60 to 30 seconds for better UX
             ->post("{$this->baseUrl}/api/chat", [
                 'model' => $this->model,
                 'messages' => [

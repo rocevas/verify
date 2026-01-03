@@ -139,7 +139,7 @@ return [
 
     'score_weights' => [
         'syntax' => 10,
-        'mx' => 30,
+        'mx_record' => 30,
         'smtp' => 50,
         'disposable' => 10, // Added if not disposable
         'role_penalty' => 20, // Subtracted if role-based

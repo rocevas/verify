@@ -340,7 +340,10 @@ const addMessage = (content, type = 'assistant', data = null) => {
 
     saveMessagesToStorage();
     // Force scroll when adding new message (user action)
-    scrollToBottom(false, true);
+    nextTick(() => {
+        scrollToBottom(false, true);
+        ensureScrollToBottom(true, 5, true);
+    });
 };
 
 // Automatically detect input type
@@ -510,7 +513,7 @@ const verifySingleEmail = async (email) => {
 
                                 // Update content with latest step
                                 currentMessage.content = data.message;
-                                scrollToBottom();
+                                scrollToBottom(false, true);
                             } else if (data.type === 'result') {
                             if (currentMessage) {
                                 currentMessage.isProcessing = false;
@@ -520,7 +523,7 @@ const verifySingleEmail = async (email) => {
                             } else {
                                 addMessage(formatResult(data.data), 'assistant', data.data);
                             }
-                                scrollToBottom();
+                                scrollToBottom(false, true);
                             }
                         } catch (e) {
                             if (e instanceof Error && e.message.includes('error')) {
@@ -537,10 +540,11 @@ const verifySingleEmail = async (email) => {
     } catch (error) {
         console.error('Verification error:', error);
         addMessage(`Error: ${error.message}`, 'assistant');
-    } finally {
-        isProcessing.value = false;
-        scrollToBottom();
-    }
+        } finally {
+            isProcessing.value = false;
+            scrollToBottom(false, true);
+            nextTick(() => ensureScrollToBottom(true, 5, true));
+        }
 };
 
 const verifyBatchEmails = async (emailsText) => {
@@ -613,10 +617,11 @@ const verifyBatchEmails = async (emailsText) => {
             ? 'Connection interrupted. You can view results in the detail page using the link above.'
             : error.message;
         addMessage(`Error: ${errorMessage}`, 'assistant');
-    } finally {
-        isProcessing.value = false;
-        scrollToBottom();
-    }
+        } finally {
+            isProcessing.value = false;
+            scrollToBottom(false, true);
+            nextTick(() => ensureScrollToBottom(true, 5, true));
+        }
 };
 
 const verifyFile = async (file) => {
@@ -676,10 +681,11 @@ const verifyFile = async (file) => {
             ? 'Connection interrupted. You can view results in the detail page using the link above.'
             : error.message;
         addMessage(`Error: ${errorMessage}`, 'assistant');
-    } finally {
-        isProcessing.value = false;
-        scrollToBottom();
-    }
+        } finally {
+            isProcessing.value = false;
+            scrollToBottom(false, true);
+            nextTick(() => ensureScrollToBottom(true, 5, true));
+        }
 };
 
 const formatResult = (result) => {
@@ -699,7 +705,7 @@ const formatResult = (result) => {
 
     text += `**Checks:**\n`;
     text += `- Syntax: ${result.checks?.syntax ? '✅' : '❌'}\n`;
-    text += `- MX Records: ${result.checks?.mx ? '✅' : '❌'}\n`;
+    text += `- MX Records: ${result.checks?.mx_record ? '✅' : '❌'}\n`;
     text += `- SMTP: ${result.checks?.smtp ? '✅' : '❌'}\n`;
     text += `- Disposable: ${result.checks?.disposable ? '❌ Yes' : '✅ No'}\n`;
     text += `- Role-based: ${result.checks?.role ? '⚠️ Yes' : '✅ No'}\n`;
@@ -742,11 +748,11 @@ const handleKeyPress = (e) => {
 
 // Watch for messages changes and scroll to bottom when messages are loaded
 watch(messages, () => {
-    // Scroll to bottom when messages change (but only if we have messages and user is near bottom)
+    // Scroll to bottom when messages change
     if (messages.value.length > 0) {
         nextTick(() => {
-            // Only auto-scroll if user is near the bottom (within 150px)
-            ensureScrollToBottom(true, 5, false);
+            // Force scroll when new messages are added (user action or new data)
+            ensureScrollToBottom(true, 5, true);
         });
     }
 }, { deep: true, immediate: false });
@@ -811,12 +817,14 @@ onUnmounted(() => {
 
 <template>
     <AppLayout title="AI Email Verification">
-        <div class="min-h-full w-full flex flex-col items-center justify-between py-10">
-            <div class="flex flex-col items-center justify-center flex-grow text-center w-full gap-6">
-                <!-- flex flex-col h-[calc(100vh-3.5rem)] -->
-
-                <!-- Messages -->
-                <div ref="messagesContainer" @scroll="handleScroll" class="px-4 py-6 space-y-4 w-full max-w-screen-md" style="scroll-behavior: auto;">
+        <div class="flex flex-col h-full"
+             :class="{'items-center justify-center' : messages.length === 0}"
+        > <!-- h-[calc(100vh-3.5rem)] -->
+            <!-- Messages -->
+            <div ref="messagesContainer" @scroll="handleScroll" class="overflow-y-auto px-4 py-6 w-full"
+                 :class="{'flex-1' : messages.length > 0}"
+                 style="scroll-behavior: auto;">
+                   <div class="w-full max-w-screen-md mx-auto flex flex-col gap-8">
                     <!-- max-w-[72rem] w-full mx-auto -->
 
                     <div v-if="messages.length === 0" class="flex flex-col items-center gap-2 mb-3">
@@ -829,16 +837,12 @@ onUnmounted(() => {
                         </div>
                     </div>
 
-                    <div v-for="message in messages" :key="message.id" class="flex flex-col gap-4 w-full">
-                        <div v-if="message.type === 'user'" class="flex-1"></div>
+                    <div v-for="message in messages" :key="message.id" class="flex flex-col gap-1"
+                         :class="[message.type === 'user' ? 'items-end' : 'items-start']"
+                    >
 
-                        <div
-                                    :class="[
-                                'rounded-lg px-4 py-3',
-                                message.type === 'user'
-                                    ? 'bg-indigo-600 text-white ml-auto'
-                                    : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border border-gray-200 dark:border-gray-700'
-                            ]"
+                        <div class=" rounded-2xl  max-w-[70%] text-base text-white leading-7"
+                             :class="[message.type === 'user' ? 'bg-white/5 px-4 py-1' : '']"
                         >
                             <!-- User message -->
                             <div v-if="message.type === 'user'" class="whitespace-pre-wrap">
@@ -935,8 +939,8 @@ onUnmounted(() => {
                                                     <span>Syntax</span>
                                                 </div>
                                                 <div class="flex items-center gap-2">
-                                                    <span :class="message.result.checks?.mx ? 'text-green-600' : 'text-red-600'">
-                                                        {{ message.result.checks?.mx ? '✅' : '❌' }}
+                                                    <span :class="message.result.checks?.mx_record ? 'text-green-600' : 'text-red-600'">
+                                                        {{ message.result.checks?.mx_record ? '✅' : '❌' }}
                                                     </span>
                                                     <span>MX Records</span>
                                                 </div>
@@ -1114,74 +1118,71 @@ onUnmounted(() => {
 
                     <div ref="messagesEnd"></div>
                 </div>
+            </div>
 
-                <!-- Input area -->
+            <!-- Input area -->
+            <div class="w-full max-w-screen-md sticky bottom-4 mx-auto">
+                <div class="relative flex flex-col gap-4 px-2 pt-4 pb-2 bg-white/10 rounded-2xl backdrop-blur-2xl shadow-[0px_4px_4px_0px_#0000000a,0px_0px_1px_0px_#0000009e] transition-all duration-200">
 
-                <div class="w-full max-w-screen-md">
+                    <!-- Text input -->
+                    <textarea
+                        v-model="input"
+                        @keypress="handleKeyPress"
+                        placeholder="Enter email address(es) or upload a file..."
+                        rows="1"
+                        class="flex-1 bg-transparent border-transparent text-gray-900 dark:text-gray-100 resize-none w-full text-left px-3 py-0 outline-0 focus:outline-none focus:shadow-none max-h-60 overflow-y-auto text-base"
+                        :disabled="isProcessing"
+                    ></textarea>
 
-                    <div class="relative flex flex-col gap-4 px-2 pt-4 pb-2 bg-white/10 rounded-2xl backdrop-blur-2xl shadow-[0px_4px_4px_0px_#0000000a,0px_0px_1px_0px_#0000009e] transition-all duration-200">
-
-                            <!-- Text input -->
-                            <textarea
-                                v-model="input"
-                                @keypress="handleKeyPress"
-                                placeholder="Enter email address(es) or upload a file..."
-                                rows="1"
-                                class="flex-1 bg-transparent border-transparent text-gray-900 dark:text-gray-100 resize-none w-full text-left px-3 py-0 outline-0 focus:outline-none focus:shadow-none max-h-60 overflow-y-auto text-base"
+                    <div class="flex flex-wrap items-center justify-between gap-2.5 p-1 pt-0">
+                        <div>
+                            <!-- File upload button -->
+                            <input
+                                ref="fileInput"
+                                type="file"
+                                accept=".csv,.txt"
+                                @change="handleFileUpload"
+                                class="hidden"
+                            />
+                            <button
+                                type="button"
+                                @click="triggerFileUpload"
                                 :disabled="isProcessing"
-                            ></textarea>
-
-                            <div class="flex flex-wrap items-center justify-between gap-2.5 p-1 pt-0">
-                                <div>
-                                    <!-- File upload button -->
-                                    <input
-                                        ref="fileInput"
-                                        type="file"
-                                        accept=".csv,.txt"
-                                        @change="handleFileUpload"
-                                        class="hidden"
-                                    />
-                                    <button
-                                        type="button"
-                                        @click="triggerFileUpload"
-                                        :disabled="isProcessing"
-                                        class="cursor-pointer text-current rounded-full px-3.5 py-2 bg-current/5 flex items-center justify-center gap-1 bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed transition"
-                                        title="Upload CSV/TXT file"
-                                    >
-                                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 w-4 h-4"><path d="M14.8287 7.75737L9.1718 13.4142C8.78127 13.8047 8.78127 14.4379 9.1718 14.8284C9.56232 15.219 10.1955 15.219 10.586 14.8284L16.2429 9.17158C17.4144 8.00001 17.4144 6.10052 16.2429 4.92894C15.0713 3.75737 13.1718 3.75737 12.0002 4.92894L6.34337 10.5858C4.39075 12.5384 4.39075 15.7042 6.34337 17.6569C8.29599 19.6095 11.4618 19.6095 13.4144 17.6569L19.0713 12L20.4855 13.4142L14.8287 19.0711C12.095 21.8047 7.66283 21.8047 4.92916 19.0711C2.19549 16.3374 2.19549 11.9053 4.92916 9.17158L10.586 3.51473C12.5386 1.56211 15.7045 1.56211 17.6571 3.51473C19.6097 5.46735 19.6097 8.63317 17.6571 10.5858L12.0002 16.2427C10.8287 17.4142 8.92916 17.4142 7.75759 16.2427C6.58601 15.0711 6.58601 13.1716 7.75759 12L13.4144 6.34316L14.8287 7.75737Z"></path></svg>
-                                        <div class="text-sm truncate">Upload</div>
-                                    </button>
-                                </div>
-                                <div class="flex gap-2 items-center">
-                                    <!-- Clean button -->
-                                    <button
-                                        type="button"
-                                        @click="clearChatHistory"
-                                        :disabled="isProcessing"
-                                        class="cursor-pointer text-current rounded-full px-3.5 py-2 bg-current/5 flex items-center justify-center gap-1 bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed transition"
-                                        title="Clear chat history"
-                                    >
-
-                                        <div class="text-sm truncate">Clear</div>
-                                    </button>
-
-                                    <!-- Send button -->
-                                    <button
-                                        @click="verifyEmail"
-                                        :disabled="isProcessing || !input.trim()"
-                                        class="size-9 flex items-center justify-center cursor-pointer rounded-full bg-blue-400 text-white disabled:opacity-65 disabled:cursor-not-allowed transition"
-                                    >
-                                        <svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M13.0001 7.82843V20H11.0001V7.82843L5.63614 13.1924L4.22192 11.7782L12.0001 4L19.7783 11.7782L18.3641 13.1924L13.0001 7.82843Z"></path></svg>
-                                    </button>
-                                </div>
-                            </div>
+                                class="cursor-pointer text-current rounded-full px-3.5 py-2 bg-current/5 flex items-center justify-center gap-1 bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                title="Upload CSV/TXT file"
+                            >
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="shrink-0 w-4 h-4"><path d="M14.8287 7.75737L9.1718 13.4142C8.78127 13.8047 8.78127 14.4379 9.1718 14.8284C9.56232 15.219 10.1955 15.219 10.586 14.8284L16.2429 9.17158C17.4144 8.00001 17.4144 6.10052 16.2429 4.92894C15.0713 3.75737 13.1718 3.75737 12.0002 4.92894L6.34337 10.5858C4.39075 12.5384 4.39075 15.7042 6.34337 17.6569C8.29599 19.6095 11.4618 19.6095 13.4144 17.6569L19.0713 12L20.4855 13.4142L14.8287 19.0711C12.095 21.8047 7.66283 21.8047 4.92916 19.0711C2.19549 16.3374 2.19549 11.9053 4.92916 9.17158L10.586 3.51473C12.5386 1.56211 15.7045 1.56211 17.6571 3.51473C19.6097 5.46735 19.6097 8.63317 17.6571 10.5858L12.0002 16.2427C10.8287 17.4142 8.92916 17.4142 7.75759 16.2427C6.58601 15.0711 6.58601 13.1716 7.75759 12L13.4144 6.34316L14.8287 7.75737Z"></path></svg>
+                                <div class="text-sm truncate">Upload</div>
+                            </button>
                         </div>
+                        <div class="flex gap-2 items-center">
+                            <!-- Clean button -->
+                            <button
+                                type="button"
+                                @click="clearChatHistory"
+                                :disabled="isProcessing"
+                                class="cursor-pointer text-current rounded-full px-3.5 py-2 bg-current/5 flex items-center justify-center gap-1 bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                title="Clear chat history"
+                            >
 
-                    <p class="mt-2 text-xs opacity-60 text-center">
-                        Enter one email, multiple emails (separated by line/comma/semicolon), or upload a CSV/TXT file
-                    </p>
+                                <div class="text-sm truncate">Clear</div>
+                            </button>
+
+                            <!-- Send button -->
+                            <button
+                                @click="verifyEmail"
+                                :disabled="isProcessing || !input.trim()"
+                                class="size-9 flex items-center justify-center cursor-pointer rounded-full bg-blue-400 text-white disabled:opacity-65 disabled:cursor-not-allowed transition"
+                            >
+                                <svg class="w-5 h-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M13.0001 7.82843V20H11.0001V7.82843L5.63614 13.1924L4.22192 11.7782L12.0001 4L19.7783 11.7782L18.3641 13.1924L13.0001 7.82843Z"></path></svg>
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
+                <p class="mt-2 text-xs opacity-60 text-center">
+                    Enter one email, multiple emails (separated by line/comma/semicolon), or upload a CSV/TXT file
+                </p>
             </div>
         </div>
     </AppLayout>

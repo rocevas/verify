@@ -227,7 +227,7 @@ router.on('finish', () => {
                 </div>
             </aside>
 
-            <main class="w-full flex-1 min-h-screen overflow-y-auto">
+            <main class="w-full flex-1 min-h-screen">
                 <nav class="sticky top-0 z-50 bg-white dark:bg-gray-900 border-b  border-gray-100 dark:border-white/10">
                     <!-- Primary Navigation Menu -->
                     <div  class="px-4 sm:px-6 lg:px-8">
@@ -494,7 +494,7 @@ router.on('finish', () => {
                 </header>
 
                 <!-- Page Content -->
-                <div class="h-full">
+                <div class="h-[calc(100vh-3.5rem)]">
                     <Banner />
                     <slot />
                 </div>

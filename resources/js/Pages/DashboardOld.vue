@@ -357,8 +357,8 @@ onMounted(() => {
                                         <span :class="verificationResult.checks?.syntax ? 'text-green-600' : 'text-red-600'">
                                             ✓ Syntax: {{ verificationResult.checks?.syntax ? 'Pass' : 'Fail' }}
                                         </span>
-                                        <span :class="verificationResult.checks?.mx ? 'text-green-600' : 'text-red-600'">
-                                            ✓ MX: {{ verificationResult.checks?.mx ? 'Pass' : 'Fail' }}
+                                        <span :class="verificationResult.checks?.mx_record ? 'text-green-600' : 'text-red-600'">
+                                            ✓ MX: {{ verificationResult.checks?.mx_record ? 'Pass' : 'Fail' }}
                                         </span>
                                         <span :class="verificationResult.checks?.smtp ? 'text-green-600' : 'text-red-600'">
                                             ✓ SMTP: {{ verificationResult.checks?.smtp ? 'Pass' : 'Fail' }}
@@ -426,7 +426,7 @@ onMounted(() => {
                                                 <td class="px-4 py-3 text-xs">
                                                     <div class="flex gap-1">
                                                         <span :class="result.checks?.syntax ? 'text-green-600' : 'text-red-600'" title="Syntax">S</span>
-                                                        <span :class="result.checks?.mx ? 'text-green-600' : 'text-red-600'" title="MX">M</span>
+                                                        <span :class="result.checks?.mx_record ? 'text-green-600' : 'text-red-600'" title="MX">M</span>
                                                         <span :class="result.checks?.smtp ? 'text-green-600' : 'text-red-600'" title="SMTP">SMTP</span>
                                                         <span :class="!result.checks?.disposable ? 'text-green-600' : 'text-red-600'" title="Disposable">D</span>
                                                         <span :class="!result.checks?.role ? 'text-green-600' : 'text-orange-600'" title="Role">R</span>

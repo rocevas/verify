@@ -66,6 +66,22 @@ class AiVerificationController extends Controller
         $source = ($token && $token instanceof \Laravel\Sanctum\PersonalAccessToken) ? 'api' : 'ui';
 
         return new StreamedResponse(function () use ($email, $userId, $teamId, $tokenId, $source) {
+            // Set execution time limit
+            set_time_limit(120); // 2 minutes max
+            
+            // Send initial ping to keep connection alive
+            $sendPing = function() {
+                echo ": ping\n\n";
+                if (ob_get_level() > 0) {
+                    ob_flush();
+                }
+                flush();
+            };
+            
+            // Start heartbeat timer (send ping every 15 seconds)
+            $heartbeatInterval = 15;
+            $lastPing = time();
+            
             try {
                 $this->aiService->verifyWithAi(
                     $email,
@@ -74,7 +90,13 @@ class AiVerificationController extends Controller
                     $tokenId,
                     null,
                     $source,
-                    function ($data) {
+                    function ($data) use (&$lastPing, $heartbeatInterval, $sendPing) {
+                        // Send heartbeat if needed
+                        if (time() - $lastPing >= $heartbeatInterval) {
+                            $sendPing();
+                            $lastPing = time();
+                        }
+                        
                         echo "data: " . json_encode($data) . "\n\n";
                         if (ob_get_level() > 0) {
                             ob_flush();
