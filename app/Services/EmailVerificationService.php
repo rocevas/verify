@@ -99,7 +99,7 @@ class EmailVerificationService
     private function getRiskChecks(): array
     {
         return config('email-verification.risk_checks', [
-            'never_opt_in_status' => 'do_not_mail',
+            'no_reply_status' => 'do_not_mail',
             'typo_domain_status' => 'spamtrap',
             'isp_esp_status' => 'do_not_mail',
             'government_tld_status' => 'risky',
@@ -109,9 +109,9 @@ class EmailVerificationService
         ]);
     }
 
-    private function getNeverOptInKeywords(): array
+    private function getNoReplyKeywords(): array
     {
-        return config('email-verification.never_opt_in_keywords', []);
+        return config('email-verification.no_reply_keywords', []);
     }
 
     private function getTypoDomains(): array
@@ -129,9 +129,9 @@ class EmailVerificationService
         return config('email-verification.government_tlds', []);
     }
 
-    private function checkNeverOptIn(string $account): bool
+    private function checkNoReply(string $account): bool
     {
-        $keywords = $this->getNeverOptInKeywords();
+        $keywords = $this->getNoReplyKeywords();
         $accountLower = strtolower($account);
         
         // Check exact match
@@ -165,6 +165,84 @@ class EmailVerificationService
         }
         
         return false;
+    }
+    
+    /**
+     * Get the correct domain for a typo domain
+     * Returns the corrected domain if typo is detected, null otherwise
+     */
+    private function getTypoCorrection(string $domain): ?string
+    {
+        $domainLower = strtolower($domain);
+        
+        // 1. Check known typo domains list with corrections (if config has mapping)
+        $typoCorrections = config('email-verification.typo_corrections', []);
+        if (isset($typoCorrections[$domainLower])) {
+            return $typoCorrections[$domainLower];
+        }
+        
+        // 2. Automatic typo detection using fuzzy matching (if enabled)
+        if (config('email-verification.enable_automatic_typo_detection', true)) {
+            return $this->findTypoCorrection($domainLower);
+        }
+        
+        return null;
+    }
+    
+    /**
+     * Find the correct domain for a typo using fuzzy matching
+     * Returns the corrected domain if typo is detected, null otherwise
+     */
+    private function findTypoCorrection(string $domain): ?string
+    {
+        // Get all known public provider domains
+        $publicProviderDomains = $this->getPublicProviderDomains();
+        
+        $maxDistance = config('email-verification.typo_detection_max_distance', 2);
+        $minSimilarity = config('email-verification.typo_detection_min_similarity', 0.85); // 85% similarity
+        
+        $bestMatch = null;
+        $bestSimilarity = 0;
+        
+        foreach ($publicProviderDomains as $providerDomain) {
+            // Skip if domains are identical
+            if ($domain === $providerDomain) {
+                continue;
+            }
+            
+            // Check Levenshtein distance (character edits needed)
+            $distance = levenshtein($domain, $providerDomain);
+            $maxLen = max(strlen($domain), strlen($providerDomain));
+            
+            if ($maxLen === 0) {
+                continue;
+            }
+            
+            // Calculate similarity (0-1, where 1 is identical)
+            $similarity = 1 - ($distance / $maxLen);
+            
+            // Check if within threshold
+            if ($distance <= $maxDistance && $similarity >= $minSimilarity) {
+                // Track best match
+                if ($similarity > $bestSimilarity) {
+                    $bestSimilarity = $similarity;
+                    $bestMatch = $providerDomain;
+                }
+            }
+        }
+        
+        // If no similar domain found, not a typo
+        if (!$bestMatch) {
+            return null;
+        }
+        
+        // Smart check: Only return correction if domain is suspicious typo
+        // If domain is valid (exists, has MX records), it might be a real domain
+        if ($this->isDomainSuspiciousTypo($domain, $bestMatch, $bestSimilarity)) {
+            return $bestMatch;
+        }
+        
+        return null;
     }
     
     /**
@@ -295,6 +373,18 @@ class EmailVerificationService
             
             return array_unique($domains);
         });
+    }
+    
+    /**
+     * Check if domain is a free email provider (by domain name only, no MX check)
+     * This is a simpler check used for early free flag setting
+     */
+    private function isFreeEmailProviderByDomain(string $domain): bool
+    {
+        $domainLower = strtolower($domain);
+        $publicProviderDomains = $this->getPublicProviderDomains();
+        
+        return in_array($domainLower, $publicProviderDomains, true);
     }
     
     /**
@@ -675,8 +765,20 @@ class EmailVerificationService
         return true;
     }
 
+    /**
+     * Calculate and add duration to result
+     */
+    private function addDuration(array &$result, float $startTime): void
+    {
+        $endTime = microtime(true);
+        $result['duration'] = round(($endTime - $startTime) * 1000, 2); // Duration in milliseconds
+    }
+
     public function verify(string $email, ?int $userId = null, ?int $teamId = null, ?int $tokenId = null, ?int $bulkJobId = null, ?string $source = null): array
     {
+        // Start timing
+        $startTime = microtime(true);
+        
         $result = [
             'email' => $email,
             'status' => 'unknown',
@@ -690,13 +792,15 @@ class EmailVerificationService
                 'smtp' => false,
                 'disposable' => false,
                 'role' => false,
-                'never_opt_in' => false,
+                'no_reply' => false,
                 'typo_domain' => false,
                 'isp_esp' => false,
                 'government_tld' => false,
             ],
             'score' => 0,
             'error' => null,
+            'free' => false,
+            'mailbox_full' => false,
         ];
 
         $parts = null;
@@ -709,6 +813,7 @@ class EmailVerificationService
                 $result['error'] = $this->getErrorMessages()['invalid_format'];
                 $result['score'] = 0;
                 // Save even invalid emails for tracking
+                $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, ['account' => null, 'domain' => null], $bulkJobId, $source);
                 return $result;
             }
@@ -719,9 +824,13 @@ class EmailVerificationService
             // 1. Syntax check
             $result['checks']['syntax'] = $this->checkSyntax($email);
             if (!$result['checks']['syntax']) {
+                // Set free flag early (by domain name only)
+                $result['free'] = $this->isFreeEmailProviderByDomain($parts['domain']);
+                
                 $result['status'] = 'invalid';
                 $result['error'] = $this->getErrorMessages()['invalid_syntax'];
                 $result['score'] = 0;
+                $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
@@ -736,17 +845,20 @@ class EmailVerificationService
                 $result['error'] = str_replace([':reason', ':notes'], [$blacklist->reason, $notes], $errorTemplate);
                 $result['score'] = 0;
                 $result['checks']['blacklist'] = true;
+                $this->addDuration($result, $startTime);
+                $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
             $result['checks']['blacklist'] = false;
 
-            // 2.5. Never-opt-in keywords check (synthetic addresses / list poisoning)
-            $result['checks']['never_opt_in'] = $this->checkNeverOptIn($parts['account']);
-            if ($result['checks']['never_opt_in']) {
+            // 2.5. No-reply keywords check (synthetic addresses / list poisoning)
+            $result['checks']['no_reply'] = $this->checkNoReply($parts['account']);
+            if ($result['checks']['no_reply']) {
                 $riskChecks = $this->getRiskChecks();
-                $result['status'] = $riskChecks['never_opt_in_status'] ?? 'do_not_mail';
+                $result['status'] = $riskChecks['no_reply_status'] ?? 'do_not_mail';
                 $result['score'] = 0;
+                $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
@@ -756,9 +868,17 @@ class EmailVerificationService
             if ($riskChecks['enable_typo_check'] ?? true) {
                 $result['checks']['typo_domain'] = $this->checkTypoDomain($parts['domain']);
                 if ($result['checks']['typo_domain']) {
+                    // Get the corrected domain
+                    $correctedDomain = $this->getTypoCorrection($parts['domain']);
+                    if ($correctedDomain) {
+                        // Build the corrected email address
+                        $result['did_you_mean'] = $parts['account'] . '@' . $correctedDomain;
+                    }
+                    
                     $result['status'] = $riskChecks['typo_domain_status'] ?? 'spamtrap';
                     $result['score'] = 0;
                     $result['error'] = 'Typo domain detected (likely spam trap)';
+                    $this->addDuration($result, $startTime);
                     $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                     return $result;
                 }
@@ -771,6 +891,7 @@ class EmailVerificationService
                     $result['status'] = $riskChecks['isp_esp_status'] ?? 'do_not_mail';
                     $result['score'] = 0;
                     $result['error'] = 'ISP/ESP infrastructure domain (not for marketing)';
+                    $this->addDuration($result, $startTime);
                     $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                     return $result;
                 }
@@ -788,8 +909,12 @@ class EmailVerificationService
             // 3. Disposable email check
             $result['checks']['disposable'] = $this->checkDisposable($parts['domain']);
             if ($result['checks']['disposable']) {
+                // Set free flag early (by domain name only)
+                $result['free'] = $this->isFreeEmailProviderByDomain($parts['domain']);
+                
                 $result['status'] = 'do_not_mail';
                 $result['score'] = 0;
+                $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
@@ -799,6 +924,7 @@ class EmailVerificationService
                 $result['status'] = config('email-verification.unsupported_domain_status', 'skipped');
                 $result['score'] = 0;
                 $result['error'] = 'Domain does not support SMTP verification';
+                $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
@@ -816,6 +942,7 @@ class EmailVerificationService
                 $result['error'] = $domainValidity['error'] ?? 'Domain does not exist or is not accessible';
                 $result['score'] = 0;
                 $result['checks']['domain_validity'] = false;
+                $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
@@ -827,6 +954,7 @@ class EmailVerificationService
                 $result['status'] = 'invalid';
                 $result['error'] = $this->getErrorMessages()['no_mx_records'];
                 $result['score'] = $this->calculateScore($result['checks']);
+                $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $result;
             }
@@ -834,6 +962,9 @@ class EmailVerificationService
             // 4.5. Public provider check (before SMTP check)
             $mxRecords = $this->getMxRecords($parts['domain']);
             $publicProvider = $this->isPublicProvider($parts['domain'], $mxRecords);
+            
+            // Set free flag if domain is a public provider (free email provider)
+            $result['free'] = $publicProvider !== null;
             
             if ($publicProvider && ($publicProvider['skip_smtp'] ?? false)) {
                 // Skip SMTP check for public providers, but mark as valid if MX records exist
@@ -843,6 +974,7 @@ class EmailVerificationService
                     // For public providers, give full score since they're known valid providers
                     $result['score'] = 100; // Public providers are always valid if MX records exist
                     $result['error'] = null; // Clear any errors
+                    $this->addDuration($result, $startTime);
                     $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                     return $result;
                 }
@@ -857,7 +989,9 @@ class EmailVerificationService
                 try {
                     // Check rate limit before performing SMTP check
                     if ($this->checkSmtpRateLimit($parts['domain'])) {
-                        $result['checks']['smtp'] = $this->checkSmtp($email, $parts['domain']);
+                        $smtpResult = $this->checkSmtpWithDetails($email, $parts['domain']);
+                        $result['checks']['smtp'] = $smtpResult['valid'];
+                        $result['mailbox_full'] = $smtpResult['mailbox_full'] ?? false;
                         
                         // Recalculate score after SMTP check
                         $result['score'] = $this->calculateScore($result['checks']);
@@ -888,6 +1022,7 @@ class EmailVerificationService
                         $result['status'] = config('email-verification.catch_all_status', 'catch_all');
                         $result['score'] = max($result['score'], 50); // Minimum score for catch-all
                         $result['error'] = 'Catch-all server detected';
+                        $this->addDuration($result, $startTime);
                         $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                         return $result;
                     }
@@ -938,6 +1073,9 @@ class EmailVerificationService
             }
         }
 
+        // Calculate duration
+        $this->addDuration($result, $startTime);
+        
         return $result;
     }
     
@@ -996,7 +1134,7 @@ class EmailVerificationService
             'domain' => strtolower($parts[1]),
         ];
     }
-
+    
     private function checkSyntax(string $email): bool
     {
         return filter_var($email, FILTER_VALIDATE_EMAIL) !== false;
@@ -1203,11 +1341,20 @@ class EmailVerificationService
 
     private function checkSmtp(string $email, string $domain): bool
     {
+        return $this->checkSmtpWithDetails($email, $domain)['valid'];
+    }
+    
+    /**
+     * Check SMTP with detailed response information
+     * Returns array with 'valid' and 'mailbox_full' flags
+     */
+    private function checkSmtpWithDetails(string $email, string $domain): array
+    {
         // Get MX records (with caching)
         $mxRecords = $this->getMxRecords($domain);
         
         if (empty($mxRecords)) {
-            return false;
+            return ['valid' => false, 'mailbox_full' => false];
         }
 
         // Filter out skipped MX servers
@@ -1226,22 +1373,29 @@ class EmailVerificationService
         
         if (empty($mxRecordsToTry)) {
             Log::info('All MX servers are in skip list', ['domain' => $domain]);
-            return false;
+            return ['valid' => false, 'mailbox_full' => false];
         }
 
         // Try MX records in priority order, but limit to first 3 to avoid long delays
         $maxMxToTry = 3;
         $mxRecordsToTry = array_slice($mxRecordsToTry, 0, $maxMxToTry);
         
+        $mailboxFull = false;
+        
         foreach ($mxRecordsToTry as $mx) {
             $host = $mx['host'];
             $retries = $this->getSmtpRetries();
             
             for ($attempt = 0; $attempt < $retries; $attempt++) {
-                $result = $this->performSmtpCheck($host, $email);
+                $result = $this->performSmtpCheckWithDetails($host, $email);
                 
-                if ($result) {
-                    return true;
+                if ($result['valid']) {
+                    return ['valid' => true, 'mailbox_full' => $result['mailbox_full'] ?? false];
+                }
+                
+                // Track mailbox full status
+                if ($result['mailbox_full'] ?? false) {
+                    $mailboxFull = true;
                 }
                 
                 // If connection failed, add to skip list (if auto-add enabled)
@@ -1257,7 +1411,7 @@ class EmailVerificationService
             }
         }
 
-        return false;
+        return ['valid' => false, 'mailbox_full' => $mailboxFull];
     }
 
     /**
@@ -1267,6 +1421,34 @@ class EmailVerificationService
     {
         $code = (int)substr($response, 0, 3);
         $message = trim(substr($response, 4));
+        $messageLower = strtolower($message);
+        
+        // Check for mailbox full indicators
+        $mailboxFullIndicators = [
+            'mailbox full',
+            'quota exceeded',
+            'quota full',
+            'storage quota',
+            'mailbox quota',
+            'over quota',
+            'exceeded storage',
+            'mailbox is full',
+            'inbox full',
+        ];
+        
+        $isMailboxFull = false;
+        foreach ($mailboxFullIndicators as $indicator) {
+            if (str_contains($messageLower, $indicator)) {
+                $isMailboxFull = true;
+                break;
+            }
+        }
+        
+        // Also check for specific error codes that indicate mailbox full
+        // 552 = Requested mail action aborted: exceeded storage allocation
+        if ($code === 552) {
+            $isMailboxFull = true;
+        }
         
         return [
             'code' => $code,
@@ -1277,10 +1459,17 @@ class EmailVerificationService
             'is_invalid' => in_array($code, [550, 551, 552, 553, 554], true), // Permanent failures
             'is_temporary' => $code >= 400 && $code < 500, // 4xx = temporary
             'is_permanent' => $code >= 500 && $code < 600, // 5xx = permanent
+            'is_mailbox_full' => $isMailboxFull,
         ];
     }
 
     private function performSmtpCheck(string $host, string $email): bool
+    {
+        $result = $this->performSmtpCheckWithDetails($host, $email);
+        return $result['valid'];
+    }
+    
+    private function performSmtpCheckWithDetails(string $host, string $email): array
     {
         $timeout = $this->getSmtpTimeout();
         $connectionTimeout = min(2, $timeout); // Connection timeout (max 2 seconds)
@@ -1309,7 +1498,7 @@ class EmailVerificationService
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
                 @fclose($socket);
-                return false;
+                return ['valid' => false, 'mailbox_full' => false];
             }
 
             // EHLO with configurable hostname
@@ -1318,7 +1507,7 @@ class EmailVerificationService
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
                 @fclose($socket);
-                return false;
+                return ['valid' => false, 'mailbox_full' => false];
             }
 
             // Read all EHLO responses (multi-line) with timeout protection
@@ -1337,7 +1526,7 @@ class EmailVerificationService
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
                 @fclose($socket);
-                return false;
+                return ['valid' => false, 'mailbox_full' => false];
             }
 
             // RCPT TO
@@ -1347,7 +1536,7 @@ class EmailVerificationService
             if (!$response || $isTimeout()) {
                 @fwrite($socket, "QUIT\r\n");
                 @fclose($socket);
-                return false;
+                return ['valid' => false, 'mailbox_full' => false];
             }
             
             // Analyze SMTP response
@@ -1388,7 +1577,7 @@ class EmailVerificationService
                         
                         @fwrite($socket, "QUIT\r\n");
                         @fclose($socket);
-                        return false;
+                        return ['valid' => false, 'mailbox_full' => false];
                     }
                 }
             }
@@ -1398,7 +1587,10 @@ class EmailVerificationService
             @fclose($socket);
 
             // Check RCPT TO response - valid responses
-            return $responseAnalysis['is_valid'];
+            return [
+                'valid' => $responseAnalysis['is_valid'],
+                'mailbox_full' => $responseAnalysis['is_mailbox_full'] ?? false,
+            ];
 
         } catch (\Exception $e) {
             @fclose($socket);
@@ -1412,8 +1604,8 @@ class EmailVerificationService
         $score = 0;
 
         // If any high-risk check fails, score is 0
-        if ($checks['never_opt_in'] ?? false) {
-            return 0; // Never-opt-in keywords = 0
+        if ($checks['no_reply'] ?? false) {
+            return 0; // No-reply keywords = 0
         }
         if ($checks['typo_domain'] ?? false) {
             return 0; // Typo domains = 0

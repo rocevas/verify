@@ -99,7 +99,7 @@ return [
     */
 
     'role_emails' => [
-        // Global high-risk role-based addresses (never opt-in)
+        // Global high-risk role-based addresses (no-reply)
         'abuse', 'admin', 'billing', 'compliance', 'hostmaster', 'legal',
         'noc', 'postmaster', 'privacy', 'registrar', 'root', 'security',
         'webmaster', 'support', // Support is often treated as high-risk by ESPs
@@ -217,7 +217,7 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Never-Opt-In Keywords
+    | No-Reply Keywords
     |--------------------------------------------------------------------------
     |
     | Local-part keywords that indicate synthetic addresses or list poisoning.
@@ -225,7 +225,7 @@ return [
     |
     */
 
-    'never_opt_in_keywords' => [
+    'no_reply_keywords' => [
         'no-reply', 'noreply', 'do-not-reply', 'donotreply',
         'noemail', 'fake', 'test', 'example', 'sample',
         'invalid', 'null', 'void', 'devnull',
@@ -300,7 +300,7 @@ return [
     |
     | Configuration for various risk checks and their severity levels.
     |
-    | - never_opt_in_status: Status for never-opt-in keywords
+    | - no_reply_status: Status for no-reply keywords
     | - typo_domain_status: Status for typo domains
     | - isp_esp_status: Status for ISP/ESP infrastructure domains
     | - government_tld_status: Status for government/registry TLDs
@@ -311,7 +311,7 @@ return [
     */
 
     'risk_checks' => [
-        'never_opt_in_status' => 'do_not_mail',
+        'no_reply_status' => 'do_not_mail',
         'typo_domain_status' => 'spamtrap',
         'isp_esp_status' => 'do_not_mail',
         'government_tld_status' => 'risky',

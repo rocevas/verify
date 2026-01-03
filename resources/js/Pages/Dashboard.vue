@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, nextTick } from 'vue';
+import { ref, onMounted, onUnmounted, onActivated, nextTick, watch } from 'vue';
 import { router } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
 
@@ -11,13 +11,67 @@ const input = ref('');
 const isProcessing = ref(false);
 const fileInput = ref(null);
 const messagesEnd = ref(null);
+const messagesContainer = ref(null);
+const pollingIntervals = ref(new Map()); // Store polling intervals for each bulkJobId
+const isUserScrolling = ref(false); // Track if user is manually scrolling
+const userScrollTimeout = ref(null); // Timeout to reset user scrolling flag
 
-const scrollToBottom = () => {
+// Check if user is near the bottom of the container
+const isNearBottom = (threshold = 100) => {
+    if (!messagesContainer.value) return false;
+    const container = messagesContainer.value;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    return distanceFromBottom <= threshold;
+};
+
+const scrollToBottom = (instant = false, force = false) => {
+    // Don't scroll if user is manually scrolling (unless forced)
+    if (!force && isUserScrolling.value) {
+        return;
+    }
+    
     nextTick(() => {
-        if (messagesEnd.value) {
-            messagesEnd.value.scrollIntoView({ behavior: 'smooth' });
+        if (messagesContainer.value) {
+            // Only scroll if we're near the bottom or forced
+            if (force || isNearBottom(150)) {
+                messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
+            }
+        } else if (messagesEnd.value) {
+            // Fallback to scrollIntoView
+            messagesEnd.value.scrollIntoView({ behavior: instant ? 'auto' : 'smooth' });
         }
     });
+};
+
+// Force scroll to bottom when messages container becomes available
+const ensureScrollToBottom = (instant = false, retries = 5, force = false) => {
+    // Don't scroll if user is manually scrolling (unless forced)
+    if (!force && isUserScrolling.value) {
+        return false;
+    }
+    
+    if (messagesContainer.value) {
+        // Ensure container has content before scrolling
+        const container = messagesContainer.value;
+        if (container.scrollHeight > 0) {
+            // Only scroll if we're near the bottom or forced
+            if (force || isNearBottom(150)) {
+                container.scrollTop = container.scrollHeight;
+                return true; // Successfully scrolled
+            }
+        }
+    }
+    
+    if (retries > 0) {
+        // Retry if container is not ready yet
+        setTimeout(() => ensureScrollToBottom(instant, retries - 1, force), 50);
+        return false;
+    } else if (messagesEnd.value && (force || isNearBottom(150))) {
+        // Final fallback
+        messagesEnd.value.scrollIntoView({ behavior: instant ? 'auto' : 'smooth' });
+        return true;
+    }
+    return false;
 };
 
 const saveMessagesToStorage = () => {
@@ -40,14 +94,170 @@ const loadMessagesFromStorage = () => {
                 if (msg.timestamp) {
                     msg.timestamp = new Date(msg.timestamp);
                 }
+                // Mark processing messages as interrupted after page refresh
+                // SSE connection is lost, so we can't continue receiving real-time updates
+                // But backend continues processing - user can view progress in detail page
+                if (msg.isProcessing && !msg.showSummary) {
+                    msg.isProcessing = false;
+                    // Don't add error message - just note that connection was interrupted
+                    // Backend continues processing, user can check detail page
+                    if (msg.bulkJobId) {
+                        msg.content = msg.content + '\n\nℹ️ Page was refreshed. Real-time updates stopped, but verification continues in the background. Click "View Details" above to see live progress.';
+                    } else {
+                        msg.content = msg.content + '\n\nℹ️ Page was refreshed. Connection interrupted.';
+                    }
+                    // If there are completed emails, show partial summary
+                    if (msg.emails && msg.emails.length > 0) {
+                        const completed = msg.emails.filter(e => e.status === 'complete');
+                        if (completed.length > 0) {
+                            msg.showSummary = true;
+                            msg.summary = {
+                                total: msg.emails.length,
+                                valid: completed.filter(e => e.result?.status === 'valid').length,
+                                invalid: completed.filter(e => e.result?.status === 'invalid').length,
+                                risky: completed.filter(e => ['catch_all', 'risky', 'do_not_mail'].includes(e.result?.status)).length,
+                            };
+                        }
+                    }
+                }
             });
             messages.value = parsedMessages;
-            // Scroll to bottom after loading
-            scrollToBottom();
+            saveMessagesToStorage(); // Save updated messages
+            
+            // Start polling for messages with bulkJobId that are not completed
+            parsedMessages.forEach(msg => {
+                if (msg.bulkJobId && !msg.showSummary) {
+                    startPollingForBulkJob(msg.bulkJobId, msg.id);
+                }
+            });
+            
+            // Scroll to bottom immediately after loading messages (instant, no animation)
+            // Use ensureScrollToBottom which retries if container isn't ready
+            setTimeout(() => ensureScrollToBottom(true), 50);
         }
     } catch (e) {
         console.error('Failed to load messages from localStorage:', e);
     }
+};
+
+// Polling function to check bulk job status after page refresh
+const startPollingForBulkJob = (bulkJobId, messageId) => {
+    // Stop existing polling for this job if any
+    stopPollingForBulkJob(bulkJobId);
+    
+    const poll = async () => {
+        try {
+            const response = await window.axios.get(`/api/bulk-jobs/${bulkJobId}`, {
+                withCredentials: true,
+            });
+            
+            const bulkJob = response.data.bulk_job;
+            const stats = response.data.stats;
+            
+            // Find the message
+            const message = messages.value.find(m => m.id === messageId);
+            if (!message) {
+                stopPollingForBulkJob(bulkJobId);
+                return;
+            }
+            
+            // Update message with latest data
+            if (bulkJob.status === 'completed' || bulkJob.status === 'failed') {
+                // Job completed, stop polling and show summary
+                message.isProcessing = false;
+                message.showSummary = true;
+                message.summary = {
+                    total: stats.total,
+                    valid: stats.valid,
+                    invalid: stats.invalid,
+                    risky: stats.risky,
+                };
+                message.content = `Verification completed: ${stats.valid} valid, ${stats.invalid} invalid, ${stats.risky} risky`;
+                stopPollingForBulkJob(bulkJobId);
+                saveMessagesToStorage();
+            } else {
+                // Job still processing, update progress
+                // Use stats.total instead of processed_emails as it's more accurate
+                const processedCount = stats.total || bulkJob.processed_emails || 0;
+                message.content = `Processing ${processedCount}/${bulkJob.total_emails} emails (${stats.valid} valid, ${stats.invalid} invalid, ${stats.risky} risky)`;
+                
+                // Load new emails if available
+                try {
+                    const emailsResponse = await window.axios.get(`/api/bulk-jobs/${bulkJobId}/emails`, {
+                        params: { page: 1, per_page: 100 },
+                        withCredentials: true,
+                    });
+                    
+                    const newEmails = emailsResponse.data.data || [];
+                    
+                    // Update or add emails to message
+                    if (!message.emails) {
+                        message.emails = [];
+                    }
+                    
+                    // Create a map of existing emails
+                    const existingEmailsMap = new Map(message.emails.map(e => [e.email, e]));
+                    
+                    // Add or update emails
+                    newEmails.forEach(emailData => {
+                        if (existingEmailsMap.has(emailData.email)) {
+                            // Update existing email
+                            const existing = existingEmailsMap.get(emailData.email);
+                            existing.status = 'complete';
+                            existing.result = {
+                                status: emailData.status,
+                                score: emailData.score,
+                                ai_confidence: emailData.ai_confidence,
+                                ai_insights: emailData.ai_insights,
+                            };
+                        } else {
+                            // Add new email
+                            message.emails.push({
+                                email: emailData.email,
+                                index: message.emails.length + 1,
+                                status: 'complete',
+                                result: {
+                                    status: emailData.status,
+                                    score: emailData.score,
+                                    ai_confidence: emailData.ai_confidence,
+                                    ai_insights: emailData.ai_insights,
+                                },
+                                currentStep: `Completed: ${emailData.status}`,
+                                steps: [],
+                            });
+                        }
+                    });
+                    
+                    saveMessagesToStorage();
+                } catch (emailError) {
+                    console.error('Failed to load emails:', emailError);
+                }
+            }
+        } catch (error) {
+            console.error('Polling error:', error);
+            // Don't stop polling on error, just log it
+        }
+    };
+    
+    // Poll immediately, then every 3 seconds
+    poll();
+    const intervalId = setInterval(poll, 3000);
+    pollingIntervals.value.set(bulkJobId, intervalId);
+};
+
+const stopPollingForBulkJob = (bulkJobId) => {
+    const intervalId = pollingIntervals.value.get(bulkJobId);
+    if (intervalId) {
+        clearInterval(intervalId);
+        pollingIntervals.value.delete(bulkJobId);
+    }
+};
+
+const stopAllPolling = () => {
+    pollingIntervals.value.forEach((intervalId) => {
+        clearInterval(intervalId);
+    });
+    pollingIntervals.value.clear();
 };
 
 const addMessage = (content, type = 'assistant', data = null) => {
@@ -58,43 +268,44 @@ const addMessage = (content, type = 'assistant', data = null) => {
         data,
         timestamp: new Date(),
     });
-    
+
     // Keep only last 50 messages
     if (messages.value.length > MAX_MESSAGES) {
         messages.value = messages.value.slice(-MAX_MESSAGES);
     }
-    
+
     saveMessagesToStorage();
-    scrollToBottom();
+    // Force scroll when adding new message (user action)
+    scrollToBottom(false, true);
 };
 
 // Automatically detect input type
 const detectInputType = (text) => {
     if (!text || !text.trim()) return null;
-    
+
     const trimmed = text.trim();
     const lines = trimmed.split(/[\n,;]/).map(l => l.trim()).filter(l => l.length > 0);
-    
+
     // Check if it's a single email
     if (lines.length === 1 && trimmed.includes('@') && trimmed.split('@').length === 2) {
         return 'single';
     }
-    
+
     // Check if it's multiple emails
     const emailCount = lines.filter(line => {
         const parts = line.split('@');
         return parts.length === 2 && parts[0].length > 0 && parts[1].length > 0;
     }).length;
-    
+
     if (emailCount > 1) {
         return 'batch';
     }
-    
+
     // If it looks like email but only one, treat as single
     if (emailCount === 1) {
         return 'single';
     }
-    
+
     return null;
 };
 
@@ -105,15 +316,15 @@ const verifyEmail = async () => {
 
     const userInput = input.value.trim();
     const inputType = detectInputType(userInput);
-    
+
     if (!inputType) {
         addMessage('Please enter a valid email address or multiple emails (one per line or comma-separated)', 'assistant');
         return;
     }
-    
+
     addMessage(userInput, 'user');
     input.value = '';
-    
+
     if (inputType === 'single') {
         await verifySingleEmail(userInput);
     } else {
@@ -130,12 +341,12 @@ const triggerFileUpload = () => {
 const handleFileUpload = (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    
+
     // Validate file type
     const validTypes = ['text/csv', 'text/plain', 'application/vnd.ms-excel'];
     const validExtensions = ['.csv', '.txt'];
     const fileExtension = '.' + file.name.split('.').pop().toLowerCase();
-    
+
     if (!validTypes.includes(file.type) && !validExtensions.includes(fileExtension)) {
         addMessage('Please upload a CSV or TXT file', 'assistant');
         // Reset file input
@@ -144,7 +355,7 @@ const handleFileUpload = (event) => {
         }
         return;
     }
-    
+
     addMessage(`📎 ${file.name}`, 'user');
     verifyFile(file);
     // Reset file input after processing starts
@@ -155,7 +366,7 @@ const handleFileUpload = (event) => {
 
 const verifySingleEmail = async (email) => {
     isProcessing.value = true;
-    
+
     try {
         const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content;
         if (!csrfToken) {
@@ -199,15 +410,15 @@ const verifySingleEmail = async (email) => {
 
                 for (const line of lines) {
                     if (line.trim() === '') continue;
-                    
+
                     if (line.startsWith('data: ')) {
                         try {
                             const data = JSON.parse(line.slice(6));
-                            
+
                             if (data.type === 'error') {
                                 throw new Error(data.message || 'Unknown error');
                             }
-                            
+
                             if (data.type === 'step') {
                                 if (!currentMessage) {
                                     currentMessage = {
@@ -219,20 +430,20 @@ const verifySingleEmail = async (email) => {
                                         timestamp: new Date(),
                                     };
                                     messages.value.push(currentMessage);
-                                    
+
                                     // Keep only last 50 messages
                                     if (messages.value.length > MAX_MESSAGES) {
                                         messages.value = messages.value.slice(-MAX_MESSAGES);
                                     }
                                     saveMessagesToStorage();
                                 }
-                                
+
                                 currentMessage.steps.push({
                                     message: data.message,
                                     step: data.step,
                                     data: data.data,
                                 });
-                                
+
                                 // Update content with latest step
                                 currentMessage.content = data.message;
                                 scrollToBottom();
@@ -285,137 +496,59 @@ const verifyBatchEmails = async (emailsText) => {
     }
 
     isProcessing.value = true;
-    
+
     try {
         const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content;
         if (!csrfToken) {
             throw new Error('CSRF token not found');
         }
 
-        const response = await fetch('/api/ai/verify/batch/stream', {
-            method: 'POST',
+        // Start batch verification (returns immediately with bulk_job_id)
+        const response = await window.axios.post('/api/ai/verify/batch/stream', {
+            emails: emails,
+        }, {
             headers: {
-                'Content-Type': 'application/json',
                 'X-CSRF-TOKEN': csrfToken,
-                'Accept': 'text/event-stream',
             },
-            credentials: 'include',
-            body: JSON.stringify({ emails }),
+            withCredentials: true,
         });
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error('Response error:', response.status, errorText);
-            throw new Error(`Batch verification failed: ${response.status} ${response.statusText}`);
+        if (!response.data.bulk_job_id) {
+            throw new Error('Failed to start batch verification');
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let currentBatchMessage = null;
-        let buffer = '';
+        const bulkJobId = response.data.bulk_job_id;
+        const totalEmails = response.data.total_emails || emails.length;
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+        // Create message for batch processing
+        const currentBatchMessage = {
+            id: Date.now(),
+            content: `Processing ${totalEmails} emails in background...`,
+            type: 'assistant',
+            emails: [],
+            isProcessing: true,
+            timestamp: new Date(),
+            total: totalEmails,
+            bulkJobId: bulkJobId,
+        };
+        messages.value.push(currentBatchMessage);
 
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    try {
-                        const data = JSON.parse(line.slice(6));
-                        
-                        if (data.type === 'email_start') {
-                            if (!currentBatchMessage) {
-                                currentBatchMessage = {
-                                    id: Date.now(),
-                                    content: `Processing ${data.total} emails...`,
-                                    type: 'assistant',
-                                    emails: [],
-                                    isProcessing: true,
-                                    timestamp: new Date(),
-                                };
-                                messages.value.push(currentBatchMessage);
-                                
-                                // Keep only last 50 messages
-                                if (messages.value.length > MAX_MESSAGES) {
-                                    messages.value = messages.value.slice(-MAX_MESSAGES);
-                                }
-                                saveMessagesToStorage();
-                            }
-                            
-                            // Check if email already exists, if not add it
-                            let emailItem = currentBatchMessage.emails.find(e => e.email === data.email);
-                            if (!emailItem) {
-                                emailItem = {
-                                    email: data.email,
-                                    index: data.index,
-                                    status: 'processing',
-                                    currentStep: 'Starting...',
-                                    steps: [],
-                                };
-                                currentBatchMessage.emails.push(emailItem);
-                            } else {
-                                emailItem.status = 'processing';
-                                emailItem.currentStep = 'Starting...';
-                            }
-                            
-                            currentBatchMessage.content = `Processing email ${data.index}/${data.total}: ${data.email}`;
-                            scrollToBottom();
-                        } else if (data.type === 'step') {
-                            const emailItem = currentBatchMessage?.emails?.find(e => e.email === data.email);
-                            if (emailItem) {
-                                if (!emailItem.steps) emailItem.steps = [];
-                                emailItem.steps.push({
-                                    message: data.message,
-                                    step: data.step,
-                                });
-                                // Update current step for real-time feedback
-                                emailItem.currentStep = data.message;
-                                // Update batch message with current progress
-                                if (currentBatchMessage) {
-                                    const processingCount = currentBatchMessage.emails.filter(e => e.status === 'processing').length;
-                                    const completeCount = currentBatchMessage.emails.filter(e => e.status === 'complete').length;
-                                    currentBatchMessage.content = `Processing ${data.index}/${data.total} emails (${completeCount} completed, ${processingCount} in progress)`;
-                                }
-                            }
-                            scrollToBottom();
-                        } else if (data.type === 'email_complete') {
-                            const emailItem = currentBatchMessage?.emails?.find(e => e.email === data.email);
-                            if (emailItem) {
-                                emailItem.status = 'complete';
-                                emailItem.result = data.result;
-                                emailItem.currentStep = `Completed: ${data.result.status}`;
-                            }
-                            
-                            if (currentBatchMessage && data.progress) {
-                                const processingCount = currentBatchMessage.emails.filter(e => e.status === 'processing').length;
-                                currentBatchMessage.content = `Processed ${data.progress.current}/${data.progress.total} emails (${data.progress.valid} valid, ${data.progress.invalid} invalid, ${data.progress.risky} risky)`;
-                            }
-                            scrollToBottom();
-                        } else if (data.type === 'batch_complete') {
-                            if (currentBatchMessage) {
-                                currentBatchMessage.isProcessing = false;
-                                // Hide individual emails and show summary instead
-                                currentBatchMessage.showSummary = true;
-                                currentBatchMessage.content = formatBatchResult(data.summary);
-                                currentBatchMessage.bulkJobId = data.bulk_job_id;
-                                currentBatchMessage.summary = data.summary;
-                                saveMessagesToStorage();
-                            }
-                            scrollToBottom();
-                        }
-                    } catch (e) {
-                        console.error('Error parsing SSE data:', e);
-                    }
-                }
-            }
+        // Keep only last 50 messages
+        if (messages.value.length > MAX_MESSAGES) {
+            messages.value = messages.value.slice(-MAX_MESSAGES);
         }
+        saveMessagesToStorage();
+        scrollToBottom();
+
+        // Start polling for progress
+        startPollingForBulkJob(bulkJobId, currentBatchMessage.id);
     } catch (error) {
         console.error('Batch verification error:', error);
-        addMessage(`Error: ${error.message}`, 'assistant');
+        // Don't show generic "network error" - show more helpful message
+        const errorMessage = error.message.includes('network') || error.message.includes('Connection')
+            ? 'Connection interrupted. You can view results in the detail page using the link above.'
+            : error.message;
+        addMessage(`Error: ${errorMessage}`, 'assistant');
     } finally {
         isProcessing.value = false;
         scrollToBottom();
@@ -424,135 +557,61 @@ const verifyBatchEmails = async (emailsText) => {
 
 const verifyFile = async (file) => {
     isProcessing.value = true;
-    
+
     const formData = new FormData();
     formData.append('file', file);
-    
+
     try {
         const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content;
         if (!csrfToken) {
             throw new Error('CSRF token not found');
         }
 
-        const response = await fetch('/api/ai/verify/upload/stream', {
-            method: 'POST',
+        // Start file verification (returns immediately with bulk_job_id)
+        const response = await window.axios.post('/api/ai/verify/upload/stream', formData, {
             headers: {
                 'X-CSRF-TOKEN': csrfToken,
-                'Accept': 'text/event-stream',
+                'Content-Type': 'multipart/form-data',
             },
-            credentials: 'include',
-            body: formData,
+            withCredentials: true,
         });
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error('Response error:', response.status, errorText);
-            throw new Error(`File verification failed: ${response.status} ${response.statusText}`);
+        if (!response.data.bulk_job_id) {
+            throw new Error('Failed to start file verification');
         }
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let currentBatchMessage = null;
-        let buffer = '';
+        const bulkJobId = response.data.bulk_job_id;
+        const totalEmails = response.data.total_emails || 0;
 
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
+        // Create message for file processing
+        const currentBatchMessage = {
+            id: Date.now(),
+            content: `Processing ${totalEmails} emails from file in background...`,
+            type: 'assistant',
+            emails: [],
+            isProcessing: true,
+            timestamp: new Date(),
+            total: totalEmails,
+            bulkJobId: bulkJobId,
+        };
+        messages.value.push(currentBatchMessage);
 
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split('\n');
-            buffer = lines.pop() || '';
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    try {
-                        const data = JSON.parse(line.slice(6));
-                        
-                        if (data.type === 'email_start') {
-                            if (!currentBatchMessage) {
-                                currentBatchMessage = {
-                                    id: Date.now(),
-                                    content: `Processing ${data.total} emails from file...`,
-                                    type: 'assistant',
-                                    emails: [],
-                                    isProcessing: true,
-                                    timestamp: new Date(),
-                                };
-                                messages.value.push(currentBatchMessage);
-                                
-                                // Keep only last 50 messages
-                                if (messages.value.length > MAX_MESSAGES) {
-                                    messages.value = messages.value.slice(-MAX_MESSAGES);
-                                }
-                                saveMessagesToStorage();
-                            }
-                            
-                            // Check if email already exists
-                            let emailItem = currentBatchMessage.emails.find(e => e.email === data.email);
-                            if (!emailItem) {
-                                emailItem = {
-                                    email: data.email,
-                                    index: data.index,
-                                    status: 'processing',
-                                    currentStep: 'Starting...',
-                                    steps: [],
-                                };
-                                currentBatchMessage.emails.push(emailItem);
-                            } else {
-                                emailItem.status = 'processing';
-                                emailItem.currentStep = 'Starting...';
-                            }
-                            
-                            currentBatchMessage.content = `Processing email ${data.index}/${data.total}: ${data.email}`;
-                            scrollToBottom();
-                        } else if (data.type === 'step') {
-                            const emailItem = currentBatchMessage?.emails?.find(e => e.email === data.email);
-                            if (emailItem) {
-                                if (!emailItem.steps) emailItem.steps = [];
-                                emailItem.steps.push({
-                                    message: data.message,
-                                    step: data.step,
-                                });
-                                emailItem.currentStep = data.message;
-                                if (currentBatchMessage) {
-                                    const processingCount = currentBatchMessage.emails.filter(e => e.status === 'processing').length;
-                                    const completeCount = currentBatchMessage.emails.filter(e => e.status === 'complete').length;
-                                    currentBatchMessage.content = `Processing ${data.index}/${data.total} emails (${completeCount} completed, ${processingCount} in progress)`;
-                                }
-                            }
-                            scrollToBottom();
-                        } else if (data.type === 'email_complete') {
-                            const emailItem = currentBatchMessage?.emails?.find(e => e.email === data.email);
-                            if (emailItem) {
-                                emailItem.status = 'complete';
-                                emailItem.result = data.result;
-                                emailItem.currentStep = `Completed: ${data.result.status}`;
-                            }
-                            
-                            if (currentBatchMessage && data.progress) {
-                                const processingCount = currentBatchMessage.emails.filter(e => e.status === 'processing').length;
-                                currentBatchMessage.content = `Processed ${data.progress.current}/${data.progress.total} emails (${data.progress.valid} valid, ${data.progress.invalid} invalid, ${data.progress.risky} risky)`;
-                            }
-                            scrollToBottom();
-                        } else if (data.type === 'batch_complete') {
-                            if (currentBatchMessage) {
-                                currentBatchMessage.isProcessing = false;
-                                currentBatchMessage.showSummary = true;
-                                currentBatchMessage.content = formatBatchResult(data.summary);
-                                currentBatchMessage.bulkJobId = data.bulk_job_id;
-                                currentBatchMessage.summary = data.summary;
-                            }
-                            scrollToBottom();
-                        }
-                    } catch (e) {
-                        console.error('Error parsing SSE data:', e);
-                    }
-                }
-            }
+        // Keep only last 50 messages
+        if (messages.value.length > MAX_MESSAGES) {
+            messages.value = messages.value.slice(-MAX_MESSAGES);
         }
+        saveMessagesToStorage();
+        scrollToBottom();
+
+        // Start polling for progress
+        startPollingForBulkJob(bulkJobId, currentBatchMessage.id);
     } catch (error) {
         console.error('File verification error:', error);
-        addMessage(`Error: ${error.message}`, 'assistant');
+        // Don't show generic "network error" - show more helpful message
+        const errorMessage = error.message.includes('network') || error.message.includes('Connection')
+            ? 'Connection interrupted. You can view results in the detail page using the link above.'
+            : error.message;
+        addMessage(`Error: ${errorMessage}`, 'assistant');
     } finally {
         isProcessing.value = false;
         scrollToBottom();
@@ -561,7 +620,7 @@ const verifyFile = async (file) => {
 
 const formatResult = (result) => {
     if (!result) return 'Verification completed';
-    
+
     const statusEmoji = {
         'valid': '✅',
         'invalid': '❌',
@@ -569,34 +628,34 @@ const formatResult = (result) => {
         'catch_all': '🔶',
         'do_not_mail': '🚫',
     };
-    
+
     let text = `${statusEmoji[result.status] || '📧'} **${result.email}**\n\n`;
     text += `**Status:** ${result.status}\n`;
     text += `**Score:** ${result.score}/100\n\n`;
-    
+
     text += `**Checks:**\n`;
     text += `- Syntax: ${result.checks?.syntax ? '✅' : '❌'}\n`;
     text += `- MX Records: ${result.checks?.mx ? '✅' : '❌'}\n`;
     text += `- SMTP: ${result.checks?.smtp ? '✅' : '❌'}\n`;
     text += `- Disposable: ${result.checks?.disposable ? '❌ Yes' : '✅ No'}\n`;
     text += `- Role-based: ${result.checks?.role ? '⚠️ Yes' : '✅ No'}\n`;
-    
+
     if (result.checks?.ai_analysis) {
         text += `- AI Analysis: ✅\n`;
     }
-    
+
     if (result.ai_insights) {
         text += `\n**AI Insights:**\n${result.ai_insights}\n`;
     }
-    
+
     if (result.ai_confidence !== null) {
         text += `\n**AI Confidence:** ${result.ai_confidence}%\n`;
     }
-    
+
     if (result.error) {
         text += `\n**Error:** ${result.error}\n`;
     }
-    
+
     return text;
 };
 
@@ -617,32 +676,84 @@ const handleKeyPress = (e) => {
     }
 };
 
+// Watch for messages changes and scroll to bottom when messages are loaded
+watch(messages, () => {
+    // Scroll to bottom when messages change (but only if we have messages and user is near bottom)
+    if (messages.value.length > 0) {
+        nextTick(() => {
+            // Only auto-scroll if user is near the bottom (within 150px)
+            ensureScrollToBottom(true, 5, false);
+        });
+    }
+}, { deep: true, immediate: false });
+
+// Handle user scroll events
+const handleScroll = () => {
+    if (!messagesContainer.value) return;
+    
+    // Mark that user is scrolling
+    isUserScrolling.value = true;
+    
+    // Clear existing timeout
+    if (userScrollTimeout.value) {
+        clearTimeout(userScrollTimeout.value);
+    }
+    
+    // Reset user scrolling flag after user stops scrolling for 1 second
+    userScrollTimeout.value = setTimeout(() => {
+        isUserScrolling.value = false;
+    }, 1000);
+};
+
+// Function to scroll to bottom with multiple retries (force on mount)
+const scrollToBottomOnMount = () => {
+    // Try multiple times with increasing delays to ensure container is ready
+    // Force scroll on mount since user just loaded the page
+    setTimeout(() => ensureScrollToBottom(true, 5, true), 100);
+    setTimeout(() => ensureScrollToBottom(true, 5, true), 300);
+    setTimeout(() => ensureScrollToBottom(true, 5, true), 500);
+    setTimeout(() => ensureScrollToBottom(true, 5, true), 800);
+    setTimeout(() => ensureScrollToBottom(true, 5, true), 1200);
+};
+
 onMounted(() => {
     // Load saved messages from storage
     loadMessagesFromStorage();
-    
+
     // Only add welcome message if there are no saved messages
     if (messages.value.length === 0) {
         addMessage('Hello! I can help you verify email addresses.\n\nYou can:\n- Enter a single email\n- Paste multiple emails (one per line, comma, or semicolon separated)\n- Upload a CSV/TXT file using the 📎 button', 'assistant');
+    }
+    
+    // Ensure scroll to bottom after component is fully mounted and messages are loaded
+    scrollToBottomOnMount();
+});
+
+// Also scroll when component is activated (if using keep-alive)
+onActivated(() => {
+    scrollToBottomOnMount();
+});
+
+onUnmounted(() => {
+    // Stop all polling when component is unmounted
+    stopAllPolling();
+    
+    // Clear scroll timeout
+    if (userScrollTimeout.value) {
+        clearTimeout(userScrollTimeout.value);
     }
 });
 </script>
 
 <template>
     <AppLayout title="AI Email Verification">
-        <div class="flex flex-col h-screen bg-gray-50 dark:bg-gray-900">
-            <!-- Header -->
-            <div class="border-b border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3">
-                <h1 class="text-lg font-semibold text-gray-900 dark:text-gray-100">
-                    AI Email Verification
-                </h1>
-                    </div>
+        <div class="flex flex-col h-[calc(100vh-3.5rem)]">
 
             <!-- Messages -->
-            <div class="flex-1 overflow-y-auto px-4 py-6 space-y-4">
+            <div ref="messagesContainer" @scroll="handleScroll" class="flex-1 overflow-y-auto px-4 py-6 space-y-4" style="scroll-behavior: auto;">
                 <div v-for="message in messages" :key="message.id" class="flex gap-4">
                     <div v-if="message.type === 'user'" class="flex-1"></div>
-                    
+
                     <div
                                 :class="[
                             'max-w-3xl rounded-lg px-4 py-3',
@@ -680,12 +791,12 @@ onMounted(() => {
                                     </svg>
                                 </div>
                             </div>
-                            
+
                             <!-- Steps (for single email) - show all steps with icons -->
                             <div v-if="message.steps && message.steps.length > 0" class="mt-3 space-y-2 text-sm">
-                                <div 
-                                    v-for="(step, idx) in message.steps" 
-                                    :key="idx" 
+                                <div
+                                    v-for="(step, idx) in message.steps"
+                                    :key="idx"
                                     class="flex items-start gap-2 p-2 bg-gray-50 dark:bg-gray-900/50 rounded border border-gray-200 dark:border-gray-700"
                                 >
                                     <div class="flex-shrink-0 mt-0.5">
@@ -711,7 +822,7 @@ onMounted(() => {
                                 <div class="p-4 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
                                     <div class="flex items-center justify-between mb-3">
                                         <h4 class="font-semibold text-base">{{ message.result.email }}</h4>
-                                        <span 
+                                        <span
                                             :class="[
                                                 'px-3 py-1 text-sm font-semibold rounded-full',
                                                 message.result.status === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
@@ -723,7 +834,7 @@ onMounted(() => {
                                             {{ message.result.status }}
                                         </span>
                                     </div>
-                                    
+
                                     <div class="grid grid-cols-2 gap-3 mb-3">
                                         <div>
                                             <div class="text-xs text-gray-500 dark:text-gray-400">Score</div>
@@ -799,6 +910,30 @@ onMounted(() => {
                                 </div>
                             </div>
 
+                            <!-- Link to bulk verification detail page (shown during processing or after refresh) -->
+                            <div v-if="message.bulkJobId" class="mt-3 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                                <div class="flex items-center justify-between">
+                                    <div class="flex items-center gap-2">
+                                        <svg v-if="message.isProcessing" class="w-5 h-5 text-blue-600 dark:text-blue-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                        </svg>
+                                        <svg v-else class="w-5 h-5 text-blue-600 dark:text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                        </svg>
+                                        <span class="text-sm text-blue-900 dark:text-blue-200">
+                                            {{ message.isProcessing ? 'Verification in progress...' : 'View live progress in detail page' }}
+                                        </span>
+                                    </div>
+                                    <button
+                                        @click="router.visit(`/verifications/bulk/${message.bulkJobId}`)"
+                                        class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium text-sm"
+                                    >
+                                        View Details →
+                                    </button>
+                                </div>
+                            </div>
+
                             <!-- Batch results - Real-time progress view -->
                             <div v-if="message.emails && message.emails.length > 0 && !message.showSummary" class="mt-3 space-y-2">
                                 <!-- Progress bar -->
@@ -810,7 +945,7 @@ onMounted(() => {
                                         </span>
                                     </div>
                                     <div class="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                                        <div 
+                                        <div
                                             class="bg-indigo-600 h-2 rounded-full transition-all duration-300"
                                             :style="`width: ${(message.emails.filter(e => e.status === 'complete').length / message.emails.length) * 100}%`"
                                         ></div>
@@ -837,7 +972,7 @@ onMounted(() => {
                                                 </div>
                                                 <!-- Quick result preview -->
                                                 <div v-else-if="emailItem.result" class="mt-1 flex items-center gap-2 text-xs">
-                                                    <span 
+                                                    <span
                                                         :class="[
                                                             'px-2 py-0.5 rounded font-semibold',
                                                             emailItem.result.status === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
@@ -864,7 +999,7 @@ onMounted(() => {
                                     <h4 class="font-semibold text-indigo-900 dark:text-indigo-200">Verification Summary</h4>
                                     <span class="text-2xl">✅</span>
                                 </div>
-                                
+
                                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
                                     <div class="text-center">
                                         <div class="text-2xl font-bold text-gray-900 dark:text-gray-100">{{ message.summary.total }}</div>
@@ -895,7 +1030,7 @@ onMounted(() => {
                             </div>
                         </div>
                     </div>
-                    
+
                     <div v-if="message.type !== 'user'" class="flex-1"></div>
                 </div>
 
@@ -923,7 +1058,7 @@ onMounted(() => {
                         >
                             📎
                         </button>
-                        
+
                         <!-- Text input -->
                         <textarea
                             v-model="input"
@@ -933,7 +1068,7 @@ onMounted(() => {
                             class="flex-1 px-4 py-3 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"
                             :disabled="isProcessing"
                         ></textarea>
-                        
+
                         <!-- Send button -->
                         <button
                             @click="verifyEmail"

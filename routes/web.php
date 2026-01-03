@@ -46,6 +46,11 @@ Route::middleware([
         return Inertia::render('BulkVerificationDetail', ['bulkJobId' => $id]);
     })->name('verifications.bulk');
 
+    // Individual Email Verification Detail page
+    Route::get('/verifications/email/{id}', function (int $id) {
+        return Inertia::render('EmailVerificationDetail', ['verificationId' => $id]);
+    })->name('verifications.email');
+
     // Monitors page
     Route::get('/monitors', [\App\Http\Controllers\MonitorController::class, 'index'])->name('monitors');
 
@@ -71,6 +76,7 @@ Route::middleware([
         Route::get('/chart', [\App\Http\Controllers\DashboardController::class, 'chart']);
         Route::get('/recent', [\App\Http\Controllers\DashboardController::class, 'recent']);
         Route::get('/bulk-jobs/{bulkJob}/emails', [\App\Http\Controllers\DashboardController::class, 'bulkJobEmails']);
+        Route::get('/verifications/{verification}', [\App\Http\Controllers\DashboardController::class, 'verificationDetail']);
     });
 
     // Bulk Verification Detail API routes

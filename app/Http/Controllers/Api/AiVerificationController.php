@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Jobs\ProcessAiBulkVerificationJob;
 use App\Services\AiEmailVerificationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -105,9 +106,10 @@ class AiVerificationController extends Controller
     }
 
     /**
-     * Verify batch emails with streaming response
+     * Verify batch emails with background job processing
+     * Returns immediately with bulk_job_id, processing continues in background
      */
-    public function batchStream(Request $request): StreamedResponse
+    public function batchStream(Request $request): \Illuminate\Http\JsonResponse
     {
         $request->validate([
             'emails' => 'required|array|max:100',
@@ -122,7 +124,6 @@ class AiVerificationController extends Controller
         }
 
         $team = $user->currentTeam;
-        $userId = $user->id;
         $teamId = $team?->id;
 
         if (!$teamId) {
@@ -142,110 +143,43 @@ class AiVerificationController extends Controller
             'filename' => 'AI Batch Verification - ' . now()->format('Y-m-d H:i:s'),
             'file_path' => null,
             'total_emails' => count($emails),
-            'status' => 'processing',
+            'status' => 'pending',
             'started_at' => now(),
         ]);
 
-        return new StreamedResponse(function () use ($emails, $userId, $teamId, $tokenId, $bulkJob, $source) {
-            $results = [];
-            $validCount = 0;
-            $invalidCount = 0;
-            $riskyCount = 0;
-            
-            $sendStream = function ($data) {
-                echo "data: " . json_encode($data) . "\n\n";
-                if (ob_get_level() > 0) {
-                    ob_flush();
-                }
-                flush();
-            };
+        // Dispatch background job to process emails
+        ProcessAiBulkVerificationJob::dispatch($bulkJob, $emails);
 
-            foreach ($emails as $index => $email) {
-                $sendStream([
-                    'type' => 'email_start',
-                    'email' => $email,
-                    'index' => $index + 1,
-                    'total' => count($emails),
-                ]);
-
-                $result = $this->aiService->verifyWithAi(
-                    $email,
-                    $userId,
-                    $teamId,
-                    $tokenId,
-                    $bulkJob->id,
-                    $source,
-                    function ($data) use ($email, $sendStream) {
-                        $data['email'] = $email;
-                        $sendStream($data);
-                    }
-                );
-
-                $results[] = $result;
-
-                // Update counts
-                if ($result['status'] === 'valid') {
-                    $validCount++;
-                } elseif ($result['status'] === 'invalid') {
-                    $invalidCount++;
-                } elseif (in_array($result['status'], ['catch_all', 'risky', 'do_not_mail'])) {
-                    $riskyCount++;
-                }
-
-                $sendStream([
-                    'type' => 'email_complete',
-                    'email' => $email,
-                    'result' => $result,
-                    'progress' => [
-                        'current' => $index + 1,
-                        'total' => count($emails),
-                        'valid' => $validCount,
-                        'invalid' => $invalidCount,
-                        'risky' => $riskyCount,
-                    ],
-                ]);
-            }
-
-            // Update bulk job
-            $bulkJob->update([
-                'status' => 'completed',
-                'processed_emails' => count($results),
-                'valid_count' => $validCount,
-                'invalid_count' => $invalidCount,
-                'risky_count' => $riskyCount,
-                'completed_at' => now(),
-            ]);
-
-            $sendStream([
-                'type' => 'batch_complete',
-                'bulk_job_id' => $bulkJob->id,
-                'summary' => [
-                    'total' => count($results),
-                    'valid' => $validCount,
-                    'invalid' => $invalidCount,
-                    'risky' => $riskyCount,
-                ],
-            ]);
-        }, 200, [
-            'Content-Type' => 'text/event-stream',
-            'Cache-Control' => 'no-cache',
-            'Connection' => 'keep-alive',
-            'X-Accel-Buffering' => 'no',
-        ]);
+        return response()->json([
+            'message' => 'Batch verification started',
+            'bulk_job_id' => $bulkJob->id,
+            'total_emails' => count($emails),
+        ], 202);
     }
 
     /**
-     * Upload file and verify with streaming
+     * Upload file and verify with background job processing
+     * Returns immediately with bulk_job_id, processing continues in background
      */
-    public function uploadStream(Request $request): StreamedResponse
+    public function uploadStream(Request $request): \Illuminate\Http\JsonResponse
     {
         $request->validate([
             'file' => 'required|file|mimes:csv,txt|max:10240',
         ]);
 
         $user = $request->user();
+        
+        if (!$user) {
+            abort(401, 'Unauthenticated');
+        }
+
         $team = $user->currentTeam;
         $teamId = $team?->id;
+
+        if (!$teamId) {
+            abort(403, 'No team selected');
+        }
+
         $token = $user->currentAccessToken();
         $tokenId = ($token instanceof \Laravel\Sanctum\PersonalAccessToken) ? $token->id : null;
         $source = ($token && $token instanceof \Laravel\Sanctum\PersonalAccessToken) ? 'csv' : 'ui';
@@ -280,96 +214,18 @@ class AiVerificationController extends Controller
             'filename' => $filename,
             'file_path' => $path,
             'total_emails' => count($emails),
-            'status' => 'processing',
+            'status' => 'pending',
             'started_at' => now(),
         ]);
 
-        $userId = $user->id;
+        // Dispatch background job to process emails
+        ProcessAiBulkVerificationJob::dispatch($bulkJob, $emails);
 
-        return new StreamedResponse(function () use ($emails, $userId, $teamId, $tokenId, $bulkJob, $source) {
-            $results = [];
-            $validCount = 0;
-            $invalidCount = 0;
-            $riskyCount = 0;
-            
-            $sendStream = function ($data) {
-                echo "data: " . json_encode($data) . "\n\n";
-                if (ob_get_level() > 0) {
-                    ob_flush();
-                }
-                flush();
-            };
-
-            foreach ($emails as $index => $email) {
-                $sendStream([
-                    'type' => 'email_start',
-                    'email' => $email,
-                    'index' => $index + 1,
-                    'total' => count($emails),
-                ]);
-
-                $result = $this->aiService->verifyWithAi(
-                    $email,
-                    $userId,
-                    $teamId,
-                    $tokenId,
-                    $bulkJob->id,
-                    $source,
-                    function ($data) use ($email, $sendStream) {
-                        $data['email'] = $email;
-                        $sendStream($data);
-                    }
-                );
-
-                $results[] = $result;
-
-                if ($result['status'] === 'valid') {
-                    $validCount++;
-                } elseif ($result['status'] === 'invalid') {
-                    $invalidCount++;
-                } elseif (in_array($result['status'], ['catch_all', 'risky', 'do_not_mail'])) {
-                    $riskyCount++;
-                }
-
-                $sendStream([
-                    'type' => 'email_complete',
-                    'email' => $email,
-                    'result' => $result,
-                    'progress' => [
-                        'current' => $index + 1,
-                        'total' => count($emails),
-                        'valid' => $validCount,
-                        'invalid' => $invalidCount,
-                        'risky' => $riskyCount,
-                    ],
-                ]);
-            }
-
-            $bulkJob->update([
-                'status' => 'completed',
-                'processed_emails' => count($results),
-                'valid_count' => $validCount,
-                'invalid_count' => $invalidCount,
-                'risky_count' => $riskyCount,
-                'completed_at' => now(),
-            ]);
-
-            $sendStream([
-                'type' => 'batch_complete',
-                'bulk_job_id' => $bulkJob->id,
-                'summary' => [
-                    'total' => count($results),
-                    'valid' => $validCount,
-                    'invalid' => $invalidCount,
-                    'risky' => $riskyCount,
-                ],
-            ]);
-        }, 200, [
-            'Content-Type' => 'text/event-stream',
-            'Cache-Control' => 'no-cache',
-            'Connection' => 'keep-alive',
-            'X-Accel-Buffering' => 'no',
-        ]);
+        return response()->json([
+            'message' => 'File verification started',
+            'bulk_job_id' => $bulkJob->id,
+            'total_emails' => count($emails),
+        ], 202);
     }
 
     private function sendStream(array $data): void

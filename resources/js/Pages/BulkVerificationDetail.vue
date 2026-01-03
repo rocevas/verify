@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { router } from '@inertiajs/vue3';
 import AppLayout from '@/Layouts/AppLayout.vue';
 import PrimaryButton from '@/Components/PrimaryButton.vue';
@@ -27,6 +27,22 @@ const emailsPagination = ref({
     total: 0
 });
 const expandedRows = ref(new Set());
+
+// Computed properties for accurate progress display
+const processedCount = computed(() => {
+    // Use stats.total as it's more accurate (counts from database)
+    // Fallback to bulkJob.processed_emails if stats.total is not available
+    return stats.value.total || bulkJob.value?.processed_emails || 0;
+});
+
+const progressPercentage = computed(() => {
+    if (!bulkJob.value || !bulkJob.value.total_emails) {
+        return 0;
+    }
+    const total = bulkJob.value.total_emails;
+    const processed = processedCount.value;
+    return total > 0 ? Math.round((processed / total) * 100) : 0;
+});
 
 const loadBulkJob = async () => {
     loading.value = true;
@@ -182,12 +198,12 @@ onUnmounted(() => {
                                 <div>
                                     <div class="text-sm font-medium text-gray-500 dark:text-gray-400">Progress</div>
                                     <div class="mt-1 text-lg font-semibold text-gray-900 dark:text-gray-100">
-                                        {{ bulkJob.processed_emails }} / {{ bulkJob.total_emails }} emails
+                                        {{ processedCount }} / {{ bulkJob.total_emails }} emails
                                     </div>
                                     <div class="mt-2 w-full bg-gray-200 rounded-full h-2.5 dark:bg-gray-700">
                                         <div
                                             class="bg-blue-600 h-2.5 rounded-full transition-all"
-                                            :style="{ width: `${bulkJob.progress_percentage}%` }"
+                                            :style="{ width: `${progressPercentage}%` }"
                                         ></div>
                                     </div>
                                 </div>

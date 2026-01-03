@@ -57,6 +57,9 @@ class AiEmailVerificationService
         ?string $source = null,
         ?callable $streamCallback = null
     ): array {
+        // Start timing
+        $startTime = microtime(true);
+        
         $result = [
             'email' => $email,
             'status' => 'unknown',
@@ -75,6 +78,8 @@ class AiEmailVerificationService
             'error' => null,
             'ai_insights' => null,
             'ai_confidence' => null,
+            'free' => false,
+            'mailbox_full' => false,
         ];
 
         // Stream: Starting verification
@@ -195,22 +200,227 @@ class AiEmailVerificationService
                 if ($aiResult) {
                     $result['ai_insights'] = $aiResult['insights'] ?? null;
                     $result['ai_confidence'] = $aiResult['confidence'] ?? null;
+                    $result['ai_risk_factors'] = $aiResult['risk_factors'] ?? [];
                     $result['checks']['ai_analysis'] = true;
+
+                    // Use AI risk factors to enhance checks
+                    $riskFactors = $aiResult['risk_factors'] ?? [];
+                    if (!empty($riskFactors)) {
+                        // Mark specific risk factors in checks
+                        if (in_array('typo_domain', $riskFactors) && !$result['checks']['typo_domain']) {
+                            $result['checks']['ai_detected_typo'] = true;
+                            
+                            // If AI detected typo and provided correction, use it
+                            if (isset($aiResult['did_you_mean']) && !isset($result['did_you_mean'])) {
+                                $result['did_you_mean'] = $aiResult['did_you_mean'];
+                            } else {
+                                // Try to get correction from traditional service
+                                $parts = explode('@', $email, 2);
+                                $correctedDomain = $this->getTypoCorrectionForDomain($parts[1] ?? '');
+                                if ($correctedDomain) {
+                                    $result['did_you_mean'] = $parts[0] . '@' . $correctedDomain;
+                                }
+                            }
+                        }
+                        if (in_array('suspicious_pattern', $riskFactors)) {
+                            $result['checks']['ai_suspicious_pattern'] = true;
+                        }
+                        if (in_array('low_reputation', $riskFactors)) {
+                            $result['checks']['ai_low_reputation'] = true;
+                        }
+                    }
+                    
+                    // If traditional service already detected typo and has correction, use it
+                    if ($result['checks']['typo_domain'] ?? false && !isset($result['did_you_mean'])) {
+                        // Correction should already be in result from traditional service
+                        // But if not, try to get it
+                        $parts = explode('@', $email, 2);
+                        $correctedDomain = $this->getTypoCorrectionForDomain($parts[1] ?? '');
+                        if ($correctedDomain) {
+                            $result['did_you_mean'] = $parts[0] . '@' . $correctedDomain;
+                        }
+                    }
 
                     // Adjust score based on AI confidence
                     if ($aiResult['confidence'] !== null) {
-                        // AI confidence is 0-100, blend with traditional score
-                        $aiWeight = 0.3; // 30% weight for AI
-                        $traditionalWeight = 0.7; // 70% weight for traditional
-                        $result['score'] = (int) round(
-                            ($result['score'] * $traditionalWeight) + 
-                            ($aiResult['confidence'] * $aiWeight)
-                        );
+                        // Check if this is a public provider email
+                        $parts = explode('@', $email, 2);
+                        $domain = strtolower($parts[1] ?? '');
+                        $publicProviders = ['gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'mail.ru', 'yandex.com', 'aol.com', 'icloud.com'];
+                        $isPublicProvider = in_array($domain, $publicProviders, true);
+                        
+                        // Check if this is a test domain
+                        $testDomains = ['test.com', 'example.com', 'example.org', 'example.net', 'test.org', 'test.net'];
+                        $isTestDomain = in_array($domain, $testDomains, true);
+                        
+                        // Check if domain is an IP address
+                        $isIpAddress = preg_match('/^\[?(\d{1,3}\.){3}\d{1,3}\]?$/', $domain) === 1;
+                        
+                        // Check if domain has invalid TLD
+                        $isInvalidTld = str_ends_with($domain, '.invalid');
+                        
+                        // Check if disposable email
+                        $isDisposable = $result['checks']['disposable'] ?? false;
+                        $disposableServiceDomains = ['guerrillamail.com', '10minutemail.com', 'mailinator.com', 'tempmail.com', 'throwaway.email', 'getnada.com', 'mohmal.com', 'trashmail.com'];
+                        $isDisposableService = in_array($domain, $disposableServiceDomains, true);
+                        
+                        // For public providers with MX records, ensure high score
+                        if ($isPublicProvider && $result['checks']['mx']) {
+                            // Public provider with MX records should have high score (90-100)
+                            // Use AI confidence if it's high, otherwise use traditional score or minimum 90
+                            $result['score'] = max(90, max($result['score'], $aiResult['confidence']));
+                        } elseif ($isTestDomain || $isIpAddress || $isInvalidTld) {
+                            // Test domains, IP addresses, and invalid TLD should have low scores (0-30)
+                            // Use AI confidence if it's low, otherwise cap at 30
+                            $result['score'] = min(30, min($result['score'], $aiResult['confidence']));
+                        } elseif ($isDisposable || $isDisposableService) {
+                            // Disposable emails should have low scores (0-40)
+                            $result['score'] = min(40, min($result['score'], $aiResult['confidence']));
+                        } else {
+                            // AI confidence is 0-100, blend with traditional score
+                            $aiWeight = 0.3; // 30% weight for AI
+                            $traditionalWeight = 0.7; // 70% weight for traditional
+                            $result['score'] = (int) round(
+                                ($result['score'] * $traditionalWeight) + 
+                                ($aiResult['confidence'] * $aiWeight)
+                            );
+                        }
                     }
 
-                    // Update status if AI suggests different
-                    if ($aiResult['suggested_status'] && $result['status'] === 'unknown') {
-                        $result['status'] = $aiResult['suggested_status'];
+                    // Use AI suggested status more aggressively if AI is confident
+                    if ($aiResult['suggested_status'] && $aiResult['confidence'] !== null) {
+                        $aiConfidence = $aiResult['confidence'];
+                        $currentStatus = $result['status'];
+                        
+                        // Check if this is a public provider email
+                        $parts = explode('@', $email, 2);
+                        $domain = strtolower($parts[1] ?? '');
+                        $publicProviders = ['gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'mail.ru', 'yandex.com', 'aol.com', 'icloud.com'];
+                        $isPublicProvider = in_array($domain, $publicProviders, true);
+                        
+                        // Check if this is a test domain
+                        $testDomains = ['test.com', 'example.com', 'example.org', 'example.net', 'test.org', 'test.net'];
+                        $isTestDomain = in_array($domain, $testDomains, true);
+                        
+                        // Check if domain is an IP address
+                        $isIpAddress = preg_match('/^\[?(\d{1,3}\.){3}\d{1,3}\]?$/', $domain) === 1;
+                        
+                        // Check if domain has invalid TLD
+                        $isInvalidTld = str_ends_with($domain, '.invalid');
+                        
+                        // Check if disposable email
+                        $isDisposable = $result['checks']['disposable'] ?? false;
+                        $disposableServiceDomains = ['guerrillamail.com', '10minutemail.com', 'mailinator.com', 'tempmail.com', 'throwaway.email', 'getnada.com', 'mohmal.com', 'trashmail.com'];
+                        $isDisposableService = in_array($domain, $disposableServiceDomains, true);
+                        
+                        // Protect public provider emails: never override 'valid' status for public providers
+                        if ($isPublicProvider && $currentStatus === 'valid') {
+                            // Public provider emails that are already marked as valid should stay valid
+                            // AI should not override valid status for public providers, even if AI suggests do_not_mail
+                            Log::debug('AI status override blocked for public provider', [
+                                'email' => $email,
+                                'current_status' => $currentStatus,
+                                'ai_suggested' => $aiResult['suggested_status'],
+                                'reason' => 'Public provider email already marked as valid',
+                            ]);
+                        } elseif ($isPublicProvider && $aiResult['suggested_status'] === 'valid' && $result['checks']['mx']) {
+                            // If public provider has MX records and AI suggests valid, always use valid
+                            $result['status'] = 'valid';
+                            Log::info('AI status override for public provider with MX', [
+                                'email' => $email,
+                                'original_status' => $currentStatus,
+                                'ai_suggested' => $aiResult['suggested_status'],
+                            ]);
+                        } elseif (($isTestDomain || $isIpAddress || $isInvalidTld) && in_array($aiResult['suggested_status'], ['invalid', 'spamtrap'])) {
+                            // Always trust AI for test domains, IP addresses, and invalid TLD - they should be invalid
+                            $result['status'] = $aiResult['suggested_status'];
+                            Log::info('AI status override for invalid domain type', [
+                                'email' => $email,
+                                'original_status' => $currentStatus,
+                                'ai_suggested' => $aiResult['suggested_status'],
+                                'domain_type' => $isTestDomain ? 'test' : ($isIpAddress ? 'ip' : 'invalid_tld'),
+                            ]);
+                        } elseif (($isDisposable || $isDisposableService) && in_array($aiResult['suggested_status'], ['do_not_mail', 'invalid'])) {
+                            // Always trust AI for disposable emails - they should be do_not_mail or invalid
+                            $result['status'] = $aiResult['suggested_status'];
+                            Log::info('AI status override for disposable email', [
+                                'email' => $email,
+                                'original_status' => $currentStatus,
+                                'ai_suggested' => $aiResult['suggested_status'],
+                            ]);
+                        } elseif ($aiConfidence >= 80 && $aiResult['suggested_status'] !== $currentStatus) {
+                            // If AI is very confident (>= 80%) and suggests different status, trust it
+                            // Only override if current status is uncertain or AI suggests more severe status
+                            $statusSeverity = [
+                                'valid' => 1,
+                                'risky' => 2,
+                                'catch_all' => 3,
+                                'do_not_mail' => 4,
+                                'invalid' => 5,
+                                'spamtrap' => 6,
+                            ];
+                            
+                            $currentSeverity = $statusSeverity[$currentStatus] ?? 0;
+                            $aiSeverity = $statusSeverity[$aiResult['suggested_status']] ?? 0;
+                            
+                            // Override if AI suggests more severe status (e.g., invalid vs risky)
+                            // or if current status is uncertain (unknown, risky, catch_all)
+                            // BUT: Never override 'valid' to 'do_not_mail' or 'invalid' for public providers
+                            // BUT: Never override invalid status for test domains, IP addresses, invalid TLD
+                            $shouldBlockOverride = false;
+                            
+                            if ($isPublicProvider && $currentStatus === 'valid' && in_array($aiResult['suggested_status'], ['do_not_mail', 'invalid'])) {
+                                $shouldBlockOverride = true;
+                                Log::debug('AI status override blocked - public provider should stay valid', [
+                                    'email' => $email,
+                                    'ai_suggested' => $aiResult['suggested_status'],
+                                ]);
+                            }
+                            
+                            if (($isTestDomain || $isIpAddress || $isInvalidTld) && $currentStatus === 'invalid' && $aiResult['suggested_status'] !== 'invalid') {
+                                $shouldBlockOverride = true;
+                                Log::debug('AI status override blocked - invalid domain type should stay invalid', [
+                                    'email' => $email,
+                                    'ai_suggested' => $aiResult['suggested_status'],
+                                ]);
+                            }
+                            
+                            if (!$shouldBlockOverride && ($aiSeverity > $currentSeverity || in_array($currentStatus, ['unknown', 'risky', 'catch_all']))) {
+                                $result['status'] = $aiResult['suggested_status'];
+                                Log::info('AI status override', [
+                                    'email' => $email,
+                                    'original_status' => $currentStatus,
+                                    'ai_suggested' => $aiResult['suggested_status'],
+                                    'ai_confidence' => $aiConfidence,
+                                ]);
+                            }
+                        } elseif ($currentStatus === 'unknown') {
+                            // Always use AI suggestion if status is unknown (unless it's a public provider that should be valid)
+                            if ($isPublicProvider && $result['checks']['mx'] && $aiResult['suggested_status'] !== 'valid') {
+                                // Public provider with MX records should be valid, not what AI suggests
+                                $result['status'] = 'valid';
+                                Log::info('AI status override blocked - public provider with MX should be valid', [
+                                    'email' => $email,
+                                    'ai_suggested' => $aiResult['suggested_status'],
+                                ]);
+                            } elseif (($isTestDomain || $isIpAddress || $isInvalidTld) && $aiResult['suggested_status'] !== 'invalid') {
+                                // Test domains, IP addresses, and invalid TLD should be invalid
+                                $result['status'] = 'invalid';
+                                Log::info('AI status override - invalid domain type should be invalid', [
+                                    'email' => $email,
+                                    'ai_suggested' => $aiResult['suggested_status'],
+                                ]);
+                            } elseif (($isDisposable || $isDisposableService) && !in_array($aiResult['suggested_status'], ['do_not_mail', 'invalid'])) {
+                                // Disposable emails should be do_not_mail or invalid
+                                $result['status'] = 'do_not_mail';
+                                Log::info('AI status override - disposable email should be do_not_mail', [
+                                    'email' => $email,
+                                    'ai_suggested' => $aiResult['suggested_status'],
+                                ]);
+                            } else {
+                                $result['status'] = $aiResult['suggested_status'];
+                            }
+                        }
                     }
 
                     if ($streamCallback) {
@@ -241,6 +451,10 @@ class AiEmailVerificationService
             }
         }
 
+        // Calculate duration
+        $endTime = microtime(true);
+        $result['duration'] = round(($endTime - $startTime) * 1000, 2); // Duration in milliseconds
+        
         // Save verification with AI data (traditional service already saved it, so we update)
         $this->updateVerificationWithAi($email, $result, $userId, $teamId);
 
@@ -287,7 +501,7 @@ class AiEmailVerificationService
      */
     private function analyzeWithOllama(string $prompt): ?array
     {
-        $systemPrompt = 'You are an expert email verification assistant. Analyze email addresses and provide insights about their validity, deliverability, and risk factors. Always respond in valid JSON format with the following structure: {"insights": "your analysis", "confidence": 0-100, "suggested_status": "valid|invalid|risky|catch_all|do_not_mail", "risk_factors": []}.';
+        $systemPrompt = 'You are an expert email verification assistant. Analyze email addresses and provide insights about their validity, deliverability, and risk factors. Always respond in valid JSON format with the following structure: {"insights": "your analysis", "confidence": 0-100, "suggested_status": "valid|invalid|risky|catch_all|do_not_mail", "did_you_mean": "corrected_email_or_null", "risk_factors": []}.';
 
         $response = Http::timeout(60) // Ollama can be slower
             ->post("{$this->baseUrl}/api/chat", [
@@ -345,6 +559,7 @@ class AiEmailVerificationService
             'insights' => $analysis['insights'] ?? null,
             'confidence' => isset($analysis['confidence']) ? (int) $analysis['confidence'] : null,
             'suggested_status' => $analysis['suggested_status'] ?? null,
+            'did_you_mean' => $analysis['did_you_mean'] ?? null,
             'risk_factors' => $analysis['risk_factors'] ?? [],
         ];
     }
@@ -397,6 +612,7 @@ class AiEmailVerificationService
             'insights' => $analysis['insights'] ?? null,
             'confidence' => isset($analysis['confidence']) ? (int) $analysis['confidence'] : null,
             'suggested_status' => $analysis['suggested_status'] ?? null,
+            'did_you_mean' => $analysis['did_you_mean'] ?? null,
             'risk_factors' => $analysis['risk_factors'] ?? [],
         ];
     }
@@ -440,20 +656,50 @@ class AiEmailVerificationService
         // Check if domain is a typo domain (common misspellings of public providers)
         $typoDomains = config('email-verification.typo_domains', []);
         $isTypoDomain = in_array(strtolower($domain), $typoDomains, true);
+        
+        // Check if domain is a test domain (should be marked as invalid)
+        $testDomains = ['test.com', 'example.com', 'example.org', 'example.net', 'test.org', 'test.net'];
+        $isTestDomain = in_array(strtolower($domain), $testDomains, true);
+        
+        // Check if domain is an IP address (e.g., [192.168.1.1])
+        $isIpAddress = preg_match('/^\[?(\d{1,3}\.){3}\d{1,3}\]?$/', $domain) === 1;
+        
+        // Check if domain has invalid TLD (.invalid is reserved)
+        $isInvalidTld = str_ends_with(strtolower($domain), '.invalid');
+        
+        // Check if disposable email
+        $isDisposable = $traditionalResult['checks']['disposable'] ?? false;
+        
+        // Check for known disposable email service domains
+        $disposableServiceDomains = ['guerrillamail.com', '10minutemail.com', 'mailinator.com', 'tempmail.com', 'throwaway.email', 'getnada.com', 'mohmal.com', 'trashmail.com'];
+        $isDisposableService = in_array(strtolower($domain), $disposableServiceDomains, true);
 
         $smtpStatus = $traditionalResult['checks']['smtp'] 
             ? 'PASS' 
             : ($traditionalResult['status'] === 'valid' && $traditionalResult['score'] >= 90 
                 ? 'SKIPPED (public provider - known valid)' 
                 : 'FAIL');
-
+        
         // Build context notes only for relevant cases
         $contextNotes = [];
         if ($isPublicProvider) {
-            $contextNotes[] = "This domain ({$domain}) is a PUBLIC EMAIL PROVIDER. These providers are KNOWN VALID and have high deliverability. They often BLOCK SMTP verification attempts for security, but this does NOT mean the email is invalid. If MX records are FOUND, confidence should be 90-100%.";
+            $mxStatus = $traditionalResult['checks']['mx'] ? 'FOUND' : 'NOT FOUND';
+            $contextNotes[] = "🚨 CRITICAL: This domain ({$domain}) is a PUBLIC EMAIL PROVIDER (Gmail, Yahoo, Outlook, etc.). These are MAJOR email providers that are ALWAYS VALID when MX records exist. Public providers ALWAYS have MX records - if MX records are FOUND, this email is VALID with 90-100% confidence. Public providers BLOCK SMTP verification for security, but this does NOT mean the email is invalid. If MX records are FOUND for a public provider, you MUST use 90-100% confidence and 'valid' status. DO NOT mark public provider emails as 'do_not_mail' or give low confidence - they are highly deliverable.";
         }
         if ($isTypoDomain) {
             $contextNotes[] = "⚠️ CRITICAL: This domain ({$domain}) is a TYPO DOMAIN (common misspelling of a public email provider like gmail.com, yahoo.com, etc.). Typo domains are often purchased by spammers or ESPs as spam traps. Even if MX records exist, this should be marked as SPAMTRAP or INVALID with LOW confidence (0-20%). Do NOT trust MX records for typo domains - they are likely spam traps.";
+        }
+        if ($isTestDomain) {
+            $contextNotes[] = "⚠️ CRITICAL: This domain ({$domain}) is a TEST DOMAIN (test.com, example.com, etc.). These are RESERVED for documentation and testing purposes. They should be marked as INVALID with LOW confidence (0-30%) regardless of MX records. These domains are NOT for real email delivery. DO NOT give high confidence (80%+) to test domains - they are always invalid.";
+        }
+        if ($isIpAddress) {
+            $contextNotes[] = "⚠️ CRITICAL: This domain ({$domain}) is an IP ADDRESS, not a domain name. IP addresses in email addresses are INVALID according to RFC standards. Mark as INVALID with LOW confidence (0-20%).";
+        }
+        if ($isInvalidTld) {
+            $contextNotes[] = "⚠️ CRITICAL: This domain ({$domain}) uses the .invalid TLD, which is RESERVED and INVALID. Mark as INVALID with LOW confidence (0-20%).";
+        }
+        if ($isDisposable || $isDisposableService) {
+            $contextNotes[] = "⚠️ CRITICAL: This domain ({$domain}) is a DISPOSABLE EMAIL SERVICE. These services provide temporary email addresses that should NOT be used for real communication. Mark as 'do_not_mail' or 'invalid' with LOW confidence (0-40%). DO NOT mark disposable emails as 'valid' even if MX records exist.";
         }
         // Only mention '+' if it's actually in the email
         if ($hasPlus) {
@@ -461,13 +707,8 @@ class AiEmailVerificationService
         }
         
         $contextSection = !empty($contextNotes) 
-            ? "\n\nIMPORTANT CONTEXT:\n" . implode("\n", array_map(fn($note) => "- " . $note, $contextNotes))
+            ? "\n\n🚨 CRITICAL CONTEXT - READ CAREFULLY:\n" . implode("\n", array_map(fn($note) => "- " . $note, $contextNotes))
             : '';
-
-        // Build strict instructions - completely remove '+' references if not present
-        $plusInstruction = $hasPlus 
-            ? "If you mention the '+' character, note it's valid for aliasing."
-            : "ABSOLUTE PROHIBITION: The '+' character is NOT in this email. DO NOT mention it, discuss it, reference it, or write ANY phrases containing '+', 'plus character', 'aliasing', or 'RFC 5322' in relation to '+'. Common forbidden phrases: 'it's worth noting that the + character', 'the + character is allowed', 'however, the + character', 'the + character in the local part'. Write as if '+' does not exist in email addresses.";
 
         return "Analyze this email address: {$email}
 
@@ -484,33 +725,154 @@ Traditional verification results:
 - Current status: {$traditionalResult['status']}
 - Current score: {$traditionalResult['score']}/100
 
-Analysis guidelines:
-" . ($isPublicProvider ? "- This is a PUBLIC PROVIDER email. If MX records are FOUND, confidence should be 90-100% (these are known valid providers).\n" : '') . "
-" . ($isTypoDomain ? "⚠️ CRITICAL: This is a TYPO DOMAIN. Even if MX records exist, this is likely a SPAM TRAP. Mark as SPAMTRAP or INVALID with LOW confidence (0-20%). Do NOT trust MX records for typo domains.\n" : '') . "
+🎯 STRICT ANALYSIS RULES - FOLLOW THESE EXACTLY:
+
+" . ($isPublicProvider ? "1. PUBLIC PROVIDER RULE (HIGHEST PRIORITY):
+   - Domain: {$domain} is a PUBLIC EMAIL PROVIDER (Gmail, Yahoo, Outlook, etc.)
+   - If MX records are FOUND: Email is VALID with 90-100% confidence, status MUST be 'valid'
+   - If MX records are NOT FOUND: This is unusual for a public provider, but still likely valid (80-90% confidence)
+   - Public providers BLOCK SMTP verification - this is NORMAL and NOT a problem
+   - DO NOT mark public provider emails as 'do_not_mail' or give low confidence
+   - DO NOT penalize for SMTP check failures - these providers intentionally block SMTP
+   - Public provider emails are HIGHLY DELIVERABLE regardless of SMTP check results
+   - Confidence: 90-100% if MX found, 80-90% if MX not found (still valid)
+   - Status: MUST be 'valid' (never 'do_not_mail' or 'invalid' for public providers)
+
+" : '') . "
+" . ($isTestDomain ? "1. TEST DOMAIN RULE (HIGHEST PRIORITY):
+   - Domain: {$domain} is a TEST DOMAIN (test.com, example.com, etc.)
+   - These domains are RESERVED for documentation/testing and NOT for real email
+   - Mark as INVALID with LOW confidence (0-30%)
+   - Status: MUST be 'invalid'
+   - DO NOT trust MX records for test domains - they are not for real use
+   - DO NOT give 80%+ confidence to test domains - they are ALWAYS invalid
+
+" : '') . "
+" . ($isIpAddress ? "1. IP ADDRESS RULE (HIGHEST PRIORITY):
+   - Domain: {$domain} is an IP ADDRESS, not a domain name
+   - IP addresses in email are INVALID according to RFC standards
+   - Mark as INVALID with LOW confidence (0-20%)
+   - Status: MUST be 'invalid'
+
+" : '') . "
+" . ($isInvalidTld ? "1. INVALID TLD RULE (HIGHEST PRIORITY):
+   - Domain: {$domain} uses .invalid TLD which is RESERVED
+   - Mark as INVALID with LOW confidence (0-20%)
+   - Status: MUST be 'invalid'
+
+" : '') . "
+" . (($isDisposable || $isDisposableService) ? "1. DISPOSABLE EMAIL RULE (HIGHEST PRIORITY):
+   - Domain: {$domain} is a DISPOSABLE EMAIL SERVICE
+   - These services provide temporary emails that should NOT be used
+   - Mark as 'do_not_mail' or 'invalid' with LOW confidence (0-40%)
+   - Status: MUST be 'do_not_mail' or 'invalid'
+   - DO NOT mark disposable emails as 'valid' even if MX records exist
+
+" : '') . "
+" . ($isTypoDomain ? "2. TYPO DOMAIN RULE:
+   - Domain: {$domain} is a TYPO DOMAIN (misspelling of a public provider)
+   - Typo domains are often SPAM TRAPS
+   - Mark as SPAMTRAP or INVALID with LOW confidence (0-20%)
+   - DO NOT trust MX records for typo domains - they are likely spam traps
+   - Status: MUST be 'spamtrap' or 'invalid'
+
+" : '') . "
+" . (!$isPublicProvider && !$isTestDomain && !$isTypoDomain && !$isIpAddress && !$isInvalidTld && !$isDisposable && !$isDisposableService ? "GENERAL RULES:
+" : '') . "
 - If syntax check PASSED, the email format is valid
-- If SMTP check is SKIPPED but status is 'valid' and score is 90-100, this is likely a public provider email - treat as HIGHLY VALID
-- Low confidence should be due to deliverability issues (no MX records, domain doesn't exist), NOT due to format validity or public provider domains
-- Focus on actual deliverability risks: missing MX records, disposable domains, role-based addresses, typo domains, etc.
-- DO NOT penalize public provider emails for SMTP check failures - these providers intentionally block SMTP verification
-- DO NOT trust MX records for typo domains - they are likely spam traps
+- Low confidence should be due to REAL deliverability issues (no MX records, domain doesn't exist, test domains, typo domains, disposable emails, IP addresses, invalid TLD), NOT due to format validity
+- Focus on actual deliverability risks: missing MX records, disposable domains, role-based addresses, typo domains, test domains, IP addresses, invalid TLD
+- DO NOT penalize valid emails for SMTP check failures if MX records exist
+- Test domains (test.com, example.com) are ALWAYS invalid regardless of MX records
+- IP addresses in email addresses are ALWAYS invalid
+- .invalid TLD is ALWAYS invalid
+- Disposable email services should be marked as 'do_not_mail' or 'invalid'
 
 " . ($hasPlus ? "NOTE: This email contains '+'. If mentioned, note it's valid for aliasing.\n\n" : "🚫 CRITICAL PROHIBITION - READ CAREFULLY:\nThe '+' character is NOT present in this email address ({$email}).\n\nDO NOT write ANY of these phrases:\n- 'it's worth noting that the + character'\n- 'the + character is allowed'\n- 'however, the + character'\n- 'the + character in the local part'\n- 'RFC 5322' in relation to '+'\n- Any mention of 'aliasing' related to '+'\n\nWrite your analysis as if '+' does not exist. Focus ONLY on what is actually in the email: domain type, MX records, deliverability.\n\n") . "
 Provide a JSON response with:
-1. 'insights': A brief analysis focusing on deliverability issues (MX records, domain validity, etc.), NOT format validity (since syntax check already passed). " . ($isTypoDomain ? "⚠️ CRITICAL: If this is a typo domain, mention it's a spam trap and mark as SPAMTRAP/INVALID even if MX records exist.\n" : '') . " " . ($hasPlus ? "You may mention '+' if relevant." : "DO NOT mention '+' character - it's not in this email.") . "
-2. 'confidence': A score from 0-100 based on deliverability likelihood (not format validity). " . ($isTypoDomain ? "If typo domain, use 0-20% confidence.\n" : '') . "
-3. 'suggested_status': One of: valid, invalid, risky, catch_all, do_not_mail, spamtrap. " . ($isTypoDomain ? "If typo domain, use 'spamtrap' or 'invalid'.\n" : '') . "
-4. 'risk_factors': Array of potential risk factors (e.g., ['missing_mx_records', 'domain_not_resolvable'" . ($isTypoDomain ? ", 'typo_domain'" : '') . "])
+1. 'insights': A brief analysis focusing on deliverability. " . ($isPublicProvider ? "For public providers, emphasize that they are known valid providers with high deliverability.\n" : '') . " " . ($isTestDomain ? "For test domains, mention they are reserved for testing and not for real email. DO NOT give high confidence.\n" : '') . " " . ($isTypoDomain ? "For typo domains, mention they are likely spam traps.\n" : '') . " " . ($isIpAddress ? "For IP addresses, mention they are invalid according to RFC standards.\n" : '') . " " . ($isInvalidTld ? "For .invalid TLD, mention it is reserved and invalid.\n" : '') . " " . (($isDisposable || $isDisposableService) ? "For disposable emails, mention they are temporary services and should not be used.\n" : '') . " " . ($hasPlus ? "You may mention '+' if relevant." : "DO NOT mention '+' character - it's not in this email.") . "
+2. 'confidence': A score from 0-100. " . ($isPublicProvider ? "For public providers: 90-100% if MX found, 80-90% if MX not found.\n" : '') . " " . ($isTestDomain ? "For test domains: 0-30% (NEVER give 80%+ to test domains).\n" : '') . " " . ($isTypoDomain ? "For typo domains: 0-20%.\n" : '') . " " . ($isIpAddress ? "For IP addresses: 0-20%.\n" : '') . " " . ($isInvalidTld ? "For .invalid TLD: 0-20%.\n" : '') . " " . (($isDisposable || $isDisposableService) ? "For disposable emails: 0-40%.\n" : '') . "
+3. 'suggested_status': One of: valid, invalid, risky, catch_all, do_not_mail, spamtrap. " . ($isPublicProvider ? "For public providers: MUST be 'valid' (NEVER 'do_not_mail' or 'invalid').\n" : '') . " " . ($isTestDomain ? "For test domains: MUST be 'invalid'.\n" : '') . " " . ($isTypoDomain ? "For typo domains: MUST be 'spamtrap' or 'invalid'.\n" : '') . " " . ($isIpAddress ? "For IP addresses: MUST be 'invalid'.\n" : '') . " " . ($isInvalidTld ? "For .invalid TLD: MUST be 'invalid'.\n" : '') . " " . (($isDisposable || $isDisposableService) ? "For disposable emails: MUST be 'do_not_mail' or 'invalid'.\n" : '') . "
+4. 'did_you_mean': " . ($isTypoDomain ? "If this is a typo domain, provide the corrected email address (e.g., if domain is 'gmai.com' and local part is 'user', return 'user@gmail.com'). If not a typo, return null.\n" : "If you detect this might be a typo domain (similar to gmail.com, yahoo.com, outlook.com, etc.), provide the corrected email address with the same local part. Otherwise, return null.\n") . "
+5. 'risk_factors': Array of specific risk factors. Use these exact values when applicable:
+   - 'missing_mx_records' - No MX records found
+   - 'domain_not_resolvable' - Domain doesn't resolve to IP
+   - 'typo_domain' - Domain is a typo of a known provider
+   - 'test_domain' - Domain is a test domain (test.com, example.com)
+   - 'ip_address' - Domain is an IP address (invalid)
+   - 'invalid_tld' - Domain uses invalid TLD (.invalid)
+   - 'disposable_service' - Domain is a disposable email service
+   - 'suspicious_pattern' - Email pattern suggests spam/fake (e.g., random characters, suspicious combinations)
+   - 'low_reputation' - Domain has low reputation indicators
+   - 'disposable_like' - Domain looks like disposable email (even if not in list)
+   - 'role_based' - Role-based email (info@, support@, etc.)
+   - 'catch_all_domain' - Domain accepts all emails (catch-all)
+   - 'public_provider_block' - Public provider that blocks SMTP checks (not a risk, just info)
 
 Focus on:
 - Domain deliverability (MX records, domain existence)
 - Domain reputation and patterns
 - Common spam/abuse indicators
 - Deliverability best practices
+" . ($isPublicProvider ? "- ⚠️ CRITICAL: Public providers are ALWAYS valid when MX records exist - use 90-100% confidence\n" : '') . "
+" . ($isTestDomain ? "- ⚠️ CRITICAL: Test domains are ALWAYS invalid - use 0-30% confidence (NEVER 80%+)\n" : '') . "
 " . ($isTypoDomain ? "- ⚠️ CRITICAL: Typo domains are spam traps - do NOT trust MX records for typo domains\n" : '') . "
+" . ($isIpAddress ? "- ⚠️ CRITICAL: IP addresses in email are ALWAYS invalid - use 0-20% confidence\n" : '') . "
+" . ($isInvalidTld ? "- ⚠️ CRITICAL: .invalid TLD is ALWAYS invalid - use 0-20% confidence\n" : '') . "
+" . (($isDisposable || $isDisposableService) ? "- ⚠️ CRITICAL: Disposable emails should be 'do_not_mail' or 'invalid' - use 0-40% confidence\n" : '') . "
 " . ($hasPlus ? "- If '+' is present, you may note it's valid for aliasing\n" : "- DO NOT mention '+' character - it's not in this email\n") . "
 - ONLY discuss features that are ACTUALLY present in the email address";
     }
 
+    /**
+     * Get typo correction for a domain
+     * Uses the traditional service's typo correction logic
+     */
+    private function getTypoCorrectionForDomain(string $domain): ?string
+    {
+        // Use reflection to access private method, or create a public wrapper
+        // For now, let's implement a simple version here
+        $domainLower = strtolower($domain);
+        
+        // Check known typo corrections from config
+        $typoCorrections = config('email-verification.typo_corrections', []);
+        if (isset($typoCorrections[$domainLower])) {
+            return $typoCorrections[$domainLower];
+        }
+        
+        // Try to find correction using fuzzy matching
+        $publicProviders = ['gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'mail.ru', 'yandex.com', 'aol.com', 'icloud.com'];
+        $maxDistance = 2;
+        $minSimilarity = 0.85;
+        
+        $bestMatch = null;
+        $bestSimilarity = 0;
+        
+        foreach ($publicProviders as $providerDomain) {
+            if ($domainLower === $providerDomain) {
+                continue;
+            }
+            
+            $distance = levenshtein($domainLower, $providerDomain);
+            $maxLen = max(strlen($domainLower), strlen($providerDomain));
+            
+            if ($maxLen === 0) {
+                continue;
+            }
+            
+            $similarity = 1 - ($distance / $maxLen);
+            
+            if ($distance <= $maxDistance && $similarity >= $minSimilarity) {
+                if ($similarity > $bestSimilarity) {
+                    $bestSimilarity = $similarity;
+                    $bestMatch = $providerDomain;
+                }
+            }
+        }
+        
+        return $bestMatch;
+    }
+    
     /**
      * Update existing verification with AI data
      */
@@ -539,9 +901,10 @@ Focus on:
                 ];
 
                 // Store AI insights in checks for now (can be extracted later)
-                if ($result['ai_insights'] || $result['ai_confidence'] !== null) {
+                if ($result['ai_insights'] || $result['ai_confidence'] !== null || !empty($result['ai_risk_factors'] ?? [])) {
                     $checks['ai_insights'] = $result['ai_insights'];
                     $checks['ai_confidence'] = $result['ai_confidence'];
+                    $checks['ai_risk_factors'] = $result['ai_risk_factors'] ?? [];
                     $updateData['checks'] = $checks;
                 }
 

@@ -330,4 +330,37 @@ class DashboardController extends Controller
             ],
         ]);
     }
+
+    public function verificationDetail(int $verification, Request $request): JsonResponse
+    {
+        $user = $request->user();
+        $team = $user->currentTeam;
+        $teamId = $team?->id;
+
+        if (!$teamId) {
+            return response()->json(['error' => 'No team selected'], 403);
+        }
+
+        // Verify the verification belongs to the team
+        $emailVerification = EmailVerification::where('id', $verification)
+            ->where('team_id', $teamId)
+            ->firstOrFail();
+
+        $checks = $emailVerification->checks ?? [];
+
+        return response()->json([
+            'verification' => [
+                'id' => $emailVerification->id,
+                'email' => $emailVerification->email,
+                'status' => $emailVerification->status,
+                'score' => $emailVerification->score,
+                'checks' => $checks,
+                'ai_confidence' => $checks['ai_confidence'] ?? null,
+                'ai_insights' => $checks['ai_insights'] ?? null,
+                'source' => $emailVerification->source,
+                'created_at' => $emailVerification->created_at?->toIso8601String(),
+                'updated_at' => $emailVerification->updated_at?->toIso8601String(),
+            ],
+        ]);
+    }
 }

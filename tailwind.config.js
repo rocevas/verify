@@ -1,6 +1,7 @@
 import defaultTheme from 'tailwindcss/defaultTheme';
 import forms from '@tailwindcss/forms';
 import typography from '@tailwindcss/typography';
+import colors from 'tailwindcss/colors';
 
 /** @type {import('tailwindcss').Config} */
 export default {
@@ -15,8 +16,23 @@ export default {
     theme: {
         extend: {
             fontFamily: {
-                sans: ['Figtree', ...defaultTheme.fontFamily.sans],
+                sans: ['Inter', ...defaultTheme.fontFamily.sans],
             },
+        },
+        colors: {
+            transparent: 'transparent',
+            current: 'currentColor',
+            black: colors.black,
+            white: colors.white,
+            teal: colors.teal,
+            yellow: colors.amber,
+            red: colors.red,
+            fuchsia: colors.fuchsia,
+            green: colors.emerald,
+            blue: colors.blue,
+            purple: colors.purple,
+            violet: colors.violet,
+            gray: colors.zinc,
         },
     },
 
