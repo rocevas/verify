@@ -118,10 +118,8 @@ router.on('finish', () => {
     <div>
         <Head :title="title" />
 
-<!--        <Banner />-->
-
         <div class="flex min-h-screen max-h-screen overflow-hidden">
-            <aside class="w-[260px] p-4 bg-gray-100 dark:bg-gray-900 flex flex-col gap-6">
+            <aside class="flex flex-col gap-6 w-64 p-5  border-r border-white/10">
                 <!-- Logo -->
                 <div class="shrink-0 flex items-center">
                     <Link :href="route('dashboard')">
@@ -129,102 +127,108 @@ router.on('finish', () => {
                     </Link>
                 </div>
 
-                <Link :href="route('dashboard')" class="rounded-md bg-white/10 hover:bg-white/20 px-4 py-2 font-medium text-sm">
-                    Chat
-                </Link>
+                <div class="flex flex-col gap-2 mt-2">
+                    <span class="text-sm opacity-70">Chats</span>
+                    <Link :href="route('dashboard')" class="flex items-center gap-2 rounded-lg bg-white/10 hover:bg-white/20 px-2.5 py-2 text-sm">
+                        <svg class="w-4 h-5 shrink-0" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M5 18.89H6.41421L15.7279 9.57627L14.3137 8.16206L5 17.4758V18.89ZM21 20.89H3V16.6473L16.435 3.21231C16.8256 2.82179 17.4587 2.82179 17.8492 3.21231L20.6777 6.04074C21.0682 6.43126 21.0682 7.06443 20.6777 7.45495L9.24264 18.89H21V20.89ZM15.7279 6.74785L17.1421 8.16206L18.5563 6.74785L17.1421 5.33363L15.7279 6.74785Z"></path></svg>
+                        New Chat
+                    </Link>
+                </div>
 
                 <!-- Email and batches list -->
-                <div class="space-y-2 max-h-[calc(100vh-8rem)] overflow-y-auto">
-                    <div class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">
-                        Recent Verifications
-                    </div>
+                <div class="flex flex-col gap-2 overflow-hidden h-full -mx-5">
+                    <span class="text-sm opacity-70 px-5">Recent Verifications</span>
+                    <div class="space-y-1 overflow-y-auto px-5">
 
-                    <!-- Combined list of all verifications -->
-                    <div v-for="item in allVerifications" :key="`${item.type}-${item.id}`" class="mb-2">
-                        <!-- Bulk Job -->
-                        <Link
-                            v-if="item.type === 'bulk'"
-                            :href="route('verifications.bulk', item.id)"
-                            class="block p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors border border-gray-200 dark:border-gray-700"
-                            :class="{ 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700': route().current('verifications.bulk') && $page.url.includes(`/verifications/bulk/${item.id}`) }"
-                        >
-                            <div class="flex items-start justify-between mb-1">
-                                <div class="flex-1 min-w-0">
-                                    <div class="flex items-center gap-1.5">
-                                        <span class="text-xs">📦</span>
-                                        <div class="text-xs font-medium text-gray-900 dark:text-gray-100 truncate" :title="item.title">
-                                            {{ item.title.length > 22 ? item.title.substring(0, 22) + '...' : item.title }}
+                        <!-- Combined list of all verifications -->
+                        <div v-for="item in allVerifications" :key="`${item.type}-${item.id}`" class="mb-2">
+                            <!-- Bulk Job -->
+                            <Link
+                                v-if="item.type === 'bulk'"
+                                :href="route('verifications.bulk', item.id)"
+                                class="block p-2 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors border border-gray-200 dark:border-gray-700"
+                                :class="{ 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700': route().current('verifications.bulk') && $page.url.includes(`/verifications/bulk/${item.id}`) }"
+                            >
+                                <div class="flex items-start justify-between mb-1">
+                                    <div class="flex-1 min-w-0">
+                                        <div class="flex items-center gap-1.5">
+                                            <span class="text-xs">📦</span>
+                                            <div class="text-xs font-medium text-gray-900 dark:text-gray-100 truncate" :title="item.title">
+                                                {{ item.title.length > 22 ? item.title.substring(0, 22) + '...' : item.title }}
+                                            </div>
+                                        </div>
+                                        <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                                            {{ formatDate(item.created_at) }}
                                         </div>
                                     </div>
-                                    <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                                        {{ formatDate(item.created_at) }}
-                                    </div>
                                 </div>
-                            </div>
-                            <div class="flex items-center gap-2 mt-1">
-                                <span :class="getStatusColor(item.status)" class="text-xs font-medium">
-                                    {{ item.status }}
-                                </span>
-                                <span class="text-xs text-gray-500 dark:text-gray-400">
-                                    {{ item.stats?.total || item.processed_emails || 0 }}/{{ item.total_emails }}
-                                </span>
-                            </div>
-                            <div v-if="item.stats" class="flex items-center gap-2 mt-1 text-xs">
-                                <span class="text-green-600 dark:text-green-400">✓ {{ item.stats.valid }}</span>
-                                <span class="text-red-600 dark:text-red-400">✗ {{ item.stats.invalid }}</span>
-                                <span class="text-yellow-600 dark:text-yellow-400">⚠ {{ item.stats.risky }}</span>
-                            </div>
-                        </Link>
-
-                        <!-- Individual Email -->
-                        <Link
-                            v-else
-                            :href="route('verifications.email', item.id)"
-                            class="block p-2 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors"
-                            :class="{ 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700': route().current('verifications.email') && $page.url.includes(`/verifications/email/${item.id}`) }"
-                        >
-                            <div class="flex items-start justify-between mb-1">
-                                <div class="flex-1 min-w-0">
-                                    <div class="flex items-center gap-1.5">
-                                        <span class="text-xs">📧</span>
-                                        <div class="text-xs font-medium text-gray-900 dark:text-gray-100 truncate" :title="item.email">
-                                            {{ item.email.length > 20 ? item.email.substring(0, 20) + '...' : item.email }}
-                                        </div>
-                                    </div>
-                                    <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                                        {{ formatDate(item.created_at) }}
-                                    </div>
-                                </div>
-                            </div>
-                            <div class="flex items-center gap-2 mt-1">
-                                <span :class="getStatusColor(item.status)" class="text-xs font-medium">
-                                    {{ item.status }}
-                                </span>
-                                    <span v-if="item.score !== null" class="text-xs text-gray-500 dark:text-gray-400">
-                                        {{ item.score }}/100
+                                <div class="flex items-center gap-2 mt-1">
+                                    <span :class="getStatusColor(item.status)" class="text-xs font-medium">
+                                        {{ item.status }}
+                                    </span>
+                                    <span class="text-xs text-gray-500 dark:text-gray-400">
+                                        {{ item.stats?.total || item.processed_emails || 0 }}/{{ item.total_emails }}
                                     </span>
                                 </div>
-                        </Link>
-                    </div>
+                                <div v-if="item.stats" class="flex items-center gap-2 mt-1 text-xs">
+                                    <span class="text-green-600 dark:text-green-400">✓ {{ item.stats.valid }}</span>
+                                    <span class="text-red-600 dark:text-red-400">✗ {{ item.stats.invalid }}</span>
+                                    <span class="text-yellow-600 dark:text-yellow-400">⚠ {{ item.stats.risky }}</span>
+                                </div>
+                            </Link>
 
-                    <!-- Empty state -->
-                    <div v-if="!loading && allVerifications.length === 0" class="text-xs text-gray-500 dark:text-gray-400 text-center py-4">
-                        No verifications yet
-                    </div>
+                            <!-- Individual Email -->
+                            <Link
+                                v-else
+                                :href="route('verifications.email', item.id)"
+                                class="block p-2 rounded-lg border border-gray-200 dark:border-gray-700 hover:bg-gray-200 dark:hover:bg-gray-800 transition-colors"
+                                :class="{ 'bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700': route().current('verifications.email') && $page.url.includes(`/verifications/email/${item.id}`) }"
+                            >
+                                <div class="flex items-start justify-between mb-1">
+                                    <div class="flex-1 min-w-0">
+                                        <div class="flex items-center gap-1.5">
+                                            <span class="text-xs">📧</span>
+                                            <div class="text-xs font-medium text-gray-900 dark:text-gray-100 truncate" :title="item.email">
+                                                {{ item.email.length > 20 ? item.email.substring(0, 20) + '...' : item.email }}
+                                            </div>
+                                        </div>
+                                        <div class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                                            {{ formatDate(item.created_at) }}
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="flex items-center gap-2 mt-1">
+                                    <span :class="getStatusColor(item.status)" class="text-xs font-medium">
+                                        {{ item.status }}
+                                    </span>
+                                        <span v-if="item.score !== null" class="text-xs text-gray-500 dark:text-gray-400">
+                                            {{ item.score }}/100
+                                        </span>
+                                    </div>
+                            </Link>
+                        </div>
 
-                    <!-- View all verifications link -->
-                    <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-                        <Link
-                            :href="route('verifications')"
-                            class="block text-center text-sm font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 transition-colors"
-                        >
-                            View all verifications →
-                        </Link>
+                        <!-- Empty state -->
+                        <div v-if="!loading && allVerifications.length === 0" class="text-xs text-gray-500 dark:text-gray-400 text-center py-4">
+                            No verifications yet
+                        </div>
                     </div>
                 </div>
+
+                <!-- View all verifications link -->
+                <div>
+                    <Link
+                        :href="route('verifications')"
+                        class="flex items-center gap-2 rounded-lg hover:bg-white/10 px-2.5 py-2 text-sm"
+                        :class="{ 'bg-white/10' : route().current('verifications') || route().current('verifications.bulk') }"
+                    >
+                        View all verifications →
+                    </Link>
+                </div>
             </aside>
+
             <main class="w-full flex-1 min-h-screen overflow-y-auto">
-                <nav class="sticky top-0 bg-white dark:bg-gray-800 border-b  border-gray-100 dark:border-white/10">
+                <nav class="sticky top-0 z-50 bg-white dark:bg-gray-900 border-b  border-gray-100 dark:border-white/10">
                     <!-- Primary Navigation Menu -->
                     <div  class="px-4 sm:px-6 lg:px-8">
                         <div class="flex justify-between h-14">
@@ -318,8 +322,8 @@ router.on('finish', () => {
                                             <div v-if="$page.props.jetstream.managesProfilePhotos" class="flex items-center gap-2">
                                                 {{ $page.props.auth.user.name }}
 
-                                                <button  class="flex text-sm border-2 border-transparent rounded-full focus:outline-none focus:border-gray-300 transition">
-                                                    <img class="size-8 rounded-full object-cover" :src="$page.props.auth.user.profile_photo_url" :alt="$page.props.auth.user.name">
+                                                <button  class="flex text-sm border-2 border-transparent rounded-full focus:outline-none focus:border-blue-400 transition">
+                                                    <img class="size-7 rounded-full object-cover" :src="$page.props.auth.user.profile_photo_url" :alt="$page.props.auth.user.name">
                                                 </button>
                                             </div>
 
@@ -490,7 +494,8 @@ router.on('finish', () => {
                 </header>
 
                 <!-- Page Content -->
-                <div>
+                <div class="h-full">
+                    <Banner />
                     <slot />
                 </div>
             </main>
