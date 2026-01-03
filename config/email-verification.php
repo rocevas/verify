@@ -139,11 +139,11 @@ return [
 
     'score_weights' => [
         'syntax' => 20,
-        'domain_validity' => 20, // Domain exists and is valid (DNS resolution)
-        'mx_record' => 25,
-        'smtp' => 25, // Reduced from 50, as SMTP is often unavailable for public providers
-        'disposable' => 10, // Added if not disposable
-        'role_penalty' => 10, // Reduced penalty for role-based emails
+        'domain_validity' => 20, // Domain exists and is valid (DNS resolution) - matches Go: domain_exists
+        'mx_record' => 20, // Matches Go: mx_records (was 25)
+        'smtp' => 20, // Matches Go: mailbox_exists (was 25)
+        'disposable' => 10, // Added if not disposable - matches Go: is_disposable
+        'role_bonus' => 10, // Added if NOT role-based - matches Go: is_role_based (was role_penalty)
         'mailbox_full_penalty' => 30, // Penalty if mailbox is full (email cannot receive mail)
         'free_email_penalty' => 0, // Small penalty for free email providers (disabled - no penalty)
     ],

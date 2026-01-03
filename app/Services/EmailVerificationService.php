@@ -1147,7 +1147,11 @@ class EmailVerificationService
             if (!$mxCheck) {
                 $result['status'] = 'invalid';
                 $result['error'] = $this->getErrorMessages()['no_mx_records'];
-                $result['score'] = $this->calculateScore($result['checks']);
+                // Don't add disposable and role_bonus if no MX records (matches Go behavior)
+                // Go skriptas: syntax (20) + domain_exists (20) = 40 (ne 60)
+                $checksForScore = $result['checks'];
+                unset($checksForScore['disposable'], $checksForScore['role']); // Remove disposable and role from score calculation
+                $result['score'] = $this->calculateScore($checksForScore);
                 $this->addDuration($result, $startTime);
                 // Determine state and result before saving
                 $stateAndResult = $this->determineStateAndResult($result);
@@ -1244,11 +1248,13 @@ class EmailVerificationService
             }
 
             // Catch-all detection (if enabled and SMTP check didn't pass)
+            // Note: Don't override score if SMTP check passed - Go skriptas doesn't do catch-all detection
             if (!$result['smtp'] && config('email-verification.enable_catch_all_detection', false)) {
                 try {
                     if ($this->isCatchAllServer($parts['domain'])) {
                         $result['status'] = config('email-verification.catch_all_status', 'catch_all');
-                        $result['score'] = max($result['score'], 50); // Minimum score for catch-all
+                        // Don't override score - keep calculated score (matches Go behavior)
+                        // Go skriptas doesn't change score for catch-all, it just sets status
                         $result['error'] = 'Catch-all server detected';
                         $this->addDuration($result, $startTime);
                         $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
@@ -2155,9 +2161,9 @@ class EmailVerificationService
             return 0;
         }
 
-        // Role-based email penalty (reduces score but doesn't zero it)
-        if ($checks['role'] ?? false) {
-            $score -= $weights['role_penalty'] ?? 10; // Reduced penalty
+        // Role-based email bonus (adds points if NOT role-based, matches Go behavior)
+        if (!($checks['role'] ?? false)) {
+            $score += $weights['role_bonus'] ?? 10; // Add points if NOT role-based (matches Go)
         }
 
         // Mailbox full penalty (significant penalty - email cannot receive mail)

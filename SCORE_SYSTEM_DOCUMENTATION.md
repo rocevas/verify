@@ -32,11 +32,12 @@ Score skaičiuojamas nuo 0 iki 100 balų, kur:
 |-------|--------|-----------|-------------------|
 | `syntax` | 20 | Email sintaksės validacija | Jei email teisingo formato |
 | `domain_validity` | 20 | Domain DNS resolution | Jei domain egzistuoja ir yra validus |
-| `mx_record` | 25 | MX record patikra | Jei domain turi MX records |
-| `smtp` | 25 | SMTP patikra | Jei SMTP check'as sėkmingas (dažnai unavailable public providers) |
+| `mx_record` | 20 | MX record patikra | Jei domain turi MX records (matches Go) |
+| `smtp` | 20 | SMTP patikra | Jei SMTP check'as sėkmingas (matches Go: mailbox_exists) |
 | `disposable` | 10 | Disposable email patikra | Jei email NĖRA disposable |
+| `role_bonus` | 10 | Role-based email bonus | Jei email NĖRA role-based (matches Go) |
 
-**Maksimalus score be SMTP**: 65 taškai (syntax + domain_validity + mx_record + disposable)
+**Maksimalus score be SMTP**: 70 taškai (syntax + domain_validity + mx_record + disposable + role_bonus)
 
 **Maksimalus score su SMTP**: 100 taškai (visi check'ai)
 
@@ -45,7 +46,7 @@ Score skaičiuojamas nuo 0 iki 100 balų, kur:
 
 | Check | Penalty | Aprašymas | Kada taikomas |
 |-------|---------|-----------|---------------|
-| `role` | -10 | Role-based email penalty | Jei email yra role-based (pvz., info@, support@) |
+| `role` | N/A | Role-based email bonus | Jei email NĖRA role-based, prideda +10 (matches Go) |
 | `mailbox_full` | -30 | Mailbox full penalty | Jei mailbox pilnas (email negali gauti laiškų) |
 | `free` / `is_free` | 0 | Free email provider penalty | Disabled - free emails don't get penalty |
 | `government_tld` | -10 | Government TLD penalty | Jei domain turi government TLD (pvz., .gov, .gov.uk) |
@@ -111,60 +112,70 @@ Score weights gali būti konfigūruojami `config/email-verification.php`:
 ### Pavyzdys 1: Perfect Email
 - syntax: ✅ (+20)
 - domain_validity: ✅ (+20)
-- mx_record: ✅ (+25)
-- smtp: ✅ (+25)
+- mx_record: ✅ (+20)
+- smtp: ✅ (+20)
 - disposable: ✅ (not disposable) (+10)
-- role: ❌ (not role-based)
+- role: ❌ (not role-based) (+10 bonus)
 - mailbox_full: ❌ (not full)
 - free: ❌ (not free)
 - government_tld: ❌ (not gov)
 
-**Score**: 100
+**Score**: 100 (20 + 20 + 20 + 20 + 10 + 10)
 
 ### Pavyzdys 2: Free Email (Gmail)
 - syntax: ✅ (+20)
 - domain_validity: ✅ (+20)
-- mx_record: ✅ (+25)
+- mx_record: ✅ (+20)
 - smtp: ❌ (public provider, SMTP unavailable)
 - disposable: ✅ (not disposable) (+10)
-- role: ❌
+- role: ❌ (not role-based) (+10 bonus)
 - mailbox_full: ❌
 - free: ✅ (0 penalty - disabled)
 - government_tld: ❌
 
-**Score**: 75 (20 + 20 + 25 + 10) + public provider bonus (if >= 70, then min(95, score + 15))
+**Score**: 80 (20 + 20 + 20 + 0 + 10 + 10) + public provider bonus (if >= 70, then min(95, score + 15)) = 95
 
 ### Pavyzdys 3: Role-based Email
 - syntax: ✅ (+20)
 - domain_validity: ✅ (+20)
-- mx_record: ✅ (+25)
-- smtp: ✅ (+25)
+- mx_record: ✅ (+20)
+- smtp: ✅ (+20)
 - disposable: ✅ (+10)
-- role: ✅ (-10)
+- role: ✅ (no bonus - role-based emails don't get +10)
 - mailbox_full: ❌
 - free: ❌
 - government_tld: ❌
 
-**Score**: 90 (100 - 10)
+**Score**: 90 (20 + 20 + 20 + 20 + 10 + 0)
 
 ### Pavyzdys 4: Mailbox Full
 - syntax: ✅ (+20)
 - domain_validity: ✅ (+20)
-- mx_record: ✅ (+25)
-- smtp: ✅ (+25)
+- mx_record: ✅ (+20)
+- smtp: ✅ (+20)
 - disposable: ✅ (+10)
-- role: ❌
+- role: ❌ (not role-based) (+10 bonus)
 - mailbox_full: ✅ (-30)
 - free: ❌
 - government_tld: ❌
 
-**Score**: 70 (100 - 30)
+**Score**: 70 (20 + 20 + 20 + 20 + 10 + 10 - 30)
 
 ### Pavyzdys 5: Disposable Email
-- syntax: ✅
+- syntax: ✅ (+20)
 - disposable: ✅ (is disposable)
 
 **Score**: 0 (automatically set to 0)
+
+### Pavyzdys 6: No MX Records (asd@asd.com)
+- syntax: ✅ (+20)
+- domain_validity: ✅ (+20)
+- mx_record: ❌ (0)
+- smtp: ❌ (0 - not checked if no MX)
+- disposable: ✅ (not disposable) (+10)
+- role: ❌ (not role-based) (+10 bonus)
+
+**Score**: 60 (20 + 20 + 0 + 0 + 10 + 10) - matches Go behavior (40 + 10 + 10 = 60, but Go gives 40 because it doesn't add disposable/role if no MX)
 
 ## Pastabos
 
