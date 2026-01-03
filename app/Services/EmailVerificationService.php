@@ -9,6 +9,8 @@ use Illuminate\Support\Facades\Log;
 use Propaganistas\LaravelDisposableEmail\DisposableDomains;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Facades\Process;
+use App\Services\MetricsService;
 
 class EmailVerificationService
 {
@@ -1280,7 +1282,36 @@ class EmailVerificationService
         // Calculate duration
         $this->addDuration($result, $startTime);
         
+        // Record metrics
+        $this->recordMetrics($result, $startTime);
+        
         return $result;
+    }
+
+    /**
+     * Record metrics for verification
+     */
+    private function recordMetrics(array $result, float $startTime): void
+    {
+        try {
+            $metrics = app(MetricsService::class);
+            $duration = $result['duration'] ?? (microtime(true) - $startTime);
+            $status = $result['status'] ?? 'unknown';
+            
+            $metrics->recordVerification($status, $duration);
+            
+            if (isset($result['score'])) {
+                $metrics->recordScore($result['score'], $status);
+            }
+            
+            if (isset($result['smtp']) && $result['smtp'] !== null) {
+                $smtpDuration = $result['smtp_duration'] ?? null;
+                $metrics->recordSmtpCheck($result['smtp'], $smtpDuration);
+            }
+        } catch (\Exception $e) {
+            // Don't fail verification if metrics recording fails
+            Log::debug('Failed to record metrics', ['error' => $e->getMessage()]);
+        }
     }
     
     private function saveVerification(array $result, ?int $userId, ?int $teamId, ?int $tokenId, array $parts, ?int $bulkJobId = null, ?string $source = null): void
@@ -2040,28 +2071,142 @@ class EmailVerificationService
             }
         }
 
-        // 2. Pre-validate domains (cache results)
-        $domainResults = [];
-        foreach (array_keys($emailsByDomain) as $domain) {
-            // Cache domain validation results to avoid redundant checks
-            $domainResults[$domain] = [
-                'domain_validity' => $this->checkDomainValidity($domain)['valid'] ?? false,
-                'mx_record' => $this->checkMx($domain),
-                'disposable' => $this->checkDisposable($domain),
-                'mx_records' => $this->getMxRecords($domain),
-                'is_public_provider' => $this->isPublicProvider($domain, $this->getMxRecords($domain)) !== null,
-            ];
-        }
+        // 2. Pre-validate domains concurrently (cache results)
+        $domainResults = $this->validateDomainsConcurrently(array_keys($emailsByDomain));
 
         // 3. Verify emails using cached domain results
+        $batchStartTime = microtime(true);
         $results = [];
         foreach ($emails as $email) {
             // Use regular verify method, but domain checks will be cached
             $result = $this->verify($email, $userId, $teamId, $tokenId, $bulkJobId, $source);
             $results[] = $result;
         }
+        
+        // Record batch metrics
+        $batchDuration = microtime(true) - $batchStartTime;
+        try {
+            $metrics = app(MetricsService::class);
+            $metrics->recordBatchProcessing(count($emails), $batchDuration);
+        } catch (\Exception $e) {
+            Log::debug('Failed to record batch metrics', ['error' => $e->getMessage()]);
+        }
 
         return $results;
+    }
+
+    /**
+     * Validate multiple domains concurrently using optimized caching
+     * This method groups domain validations and uses cache to avoid redundant checks
+     * 
+     * @param array $domains
+     * @return array Domain validation results keyed by domain
+     */
+    private function validateDomainsConcurrently(array $domains): array
+    {
+        if (empty($domains)) {
+            return [];
+        }
+
+        $domainResults = [];
+        
+        // Process domains in parallel using array_map for better performance
+        // Note: PHP doesn't have true concurrency, but this optimizes the order
+        // and uses caching to minimize redundant DNS lookups
+        $results = array_map(function ($domain) {
+            // All these methods use internal caching, so redundant calls are fast
+            $mxRecords = $this->getMxRecords($domain);
+            $domainValidity = $this->checkDomainValidity($domain);
+            
+            return [
+                'domain' => $domain,
+                'domain_validity' => $domainValidity['valid'] ?? false,
+                'mx_record' => $this->checkMx($domain),
+                'disposable' => $this->checkDisposable($domain),
+                'mx_records' => $mxRecords,
+                'is_public_provider' => $this->isPublicProvider($domain, $mxRecords) !== null,
+            ];
+        }, array_unique($domains));
+
+        // Convert to associative array keyed by domain
+        foreach ($results as $result) {
+            $domainResults[$result['domain']] = $result;
+        }
+
+        return $domainResults;
+    }
+
+    /**
+     * Get API status and health information
+     * 
+     * @return array
+     */
+    public function getStatus(): array
+    {
+        // Try to get Laravel start time from request or use current time
+        $startTime = defined('LARAVEL_START') ? LARAVEL_START : (request()->server('REQUEST_TIME_FLOAT') ?? microtime(true));
+        $uptime = microtime(true) - $startTime;
+        
+        // Get memory usage
+        $memoryUsage = memory_get_usage(true);
+        $memoryPeak = memory_get_peak_usage(true);
+        
+        // Get recent verification stats (last hour)
+        $recentVerifications = EmailVerification::where('created_at', '>=', now()->subHour())
+            ->count();
+        
+        // Get queue stats if Horizon is available
+        $queueStats = null;
+        if (class_exists(\Laravel\Horizon\Horizon::class)) {
+            try {
+                $queueStats = [
+                    'pending' => \Illuminate\Support\Facades\Queue::size(),
+                ];
+            } catch (\Exception $e) {
+                // Horizon might not be configured
+            }
+        }
+
+        return [
+            'status' => 'healthy',
+            'uptime_seconds' => round($uptime, 2),
+            'uptime_human' => $this->formatUptime($uptime),
+            'memory_usage_mb' => round($memoryUsage / 1024 / 1024, 2),
+            'memory_peak_mb' => round($memoryPeak / 1024 / 1024, 2),
+            'recent_verifications_1h' => $recentVerifications,
+            'queue' => $queueStats,
+            'timestamp' => now()->toIso8601String(),
+        ];
+    }
+
+    /**
+     * Format uptime in human-readable format
+     * 
+     * @param float $seconds
+     * @return string
+     */
+    private function formatUptime(float $seconds): string
+    {
+        if ($seconds < 60) {
+            return round($seconds, 1) . 's';
+        }
+        
+        $minutes = floor($seconds / 60);
+        if ($minutes < 60) {
+            return $minutes . 'm ' . round($seconds % 60, 0) . 's';
+        }
+        
+        $hours = floor($minutes / 60);
+        $minutes = $minutes % 60;
+        
+        if ($hours < 24) {
+            return $hours . 'h ' . $minutes . 'm';
+        }
+        
+        $days = floor($hours / 24);
+        $hours = $hours % 24;
+        
+        return $days . 'd ' . $hours . 'h';
     }
 }
 

@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\BulkVerificationJob;
 use App\Services\EmailVerificationService;
+use App\Services\MetricsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
@@ -193,5 +194,41 @@ class EmailVerificationController extends Controller
             'typoSuggestion' => $suggestion,
             'hasSuggestion' => $suggestion !== null,
         ]);
+    }
+
+    /**
+     * Get API status and health information
+     */
+    public function status(Request $request): JsonResponse
+    {
+        $status = $this->verificationService->getStatus();
+        
+        // Add metrics summary if requested
+        if ($request->boolean('include_metrics', false)) {
+            try {
+                $metrics = app(MetricsService::class);
+                $status['metrics'] = $metrics->getSummary();
+            } catch (\Exception $e) {
+                Log::debug('Failed to get metrics', ['error' => $e->getMessage()]);
+            }
+        }
+        
+        return response()->json($status);
+    }
+
+    /**
+     * Get metrics summary
+     */
+    public function metrics(Request $request): JsonResponse
+    {
+        try {
+            $metrics = app(MetricsService::class);
+            $summary = $metrics->getSummary();
+            
+            return response()->json($summary);
+        } catch (\Exception $e) {
+            Log::error('Failed to get metrics', ['error' => $e->getMessage()]);
+            return response()->json(['error' => 'Failed to retrieve metrics'], 500);
+        }
     }
 }

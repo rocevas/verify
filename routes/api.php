@@ -16,6 +16,8 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/', [EmailVerificationController::class, 'verify']);
         Route::post('/batch', [EmailVerificationController::class, 'batch']);
         Route::post('/typo-suggestions', [EmailVerificationController::class, 'typoSuggestions']);
+        Route::get('/status', [EmailVerificationController::class, 'status']);
+        Route::get('/metrics', [EmailVerificationController::class, 'metrics']);
     });
 
     // Bulk verification
