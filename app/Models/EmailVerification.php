@@ -75,6 +75,7 @@ class EmailVerification extends Model
         'is_free',
         'isp_esp',
         'government_tld',
+        'gravatar',
         'did_you_mean',
         'alias_of',
         'verified_at',
@@ -96,6 +97,7 @@ class EmailVerification extends Model
         'is_free' => 'boolean',
         'isp_esp' => 'boolean',
         'government_tld' => 'boolean',
+        'gravatar' => 'boolean',
         'ai_risk_factors' => 'array',
         'verified_at' => 'datetime',
     ];

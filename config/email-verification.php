@@ -173,6 +173,8 @@ return [
         'role_bonus' => 10, // Added if NOT role-based - matches Go: is_role_based (was role_penalty)
         'mailbox_full_penalty' => 30, // Penalty if mailbox is full (email cannot receive mail)
         'free_email_penalty' => 0, // Small penalty for free email providers (disabled - no penalty)
+        'gravatar_bonus' => 5, // Bonus if email has Gravatar (for catch-all emails) - matches gravatar_score_bonus
+        'government_tld_penalty' => 10, // Penalty for government TLDs (reduces score but doesn't zero it)
     ],
 
     /*
@@ -886,6 +888,23 @@ return [
 
     'enable_catch_all_detection' => env('EMAIL_VERIFICATION_CATCH_ALL', false),
     'catch_all_status' => 'catch_all',
+
+    /*
+    |--------------------------------------------------------------------------
+    | Gravatar Check for Catch-All Emails
+    |--------------------------------------------------------------------------
+    |
+    | Enable Gravatar check for catch-all email addresses to determine
+    | if email likely exists. If email has Gravatar, it's more likely
+    | that the email address exists and is active.
+    |
+    | This adds a small score bonus (+5 points) for catch-all emails
+    | that have Gravatar, indicating the email is more likely to exist.
+    |
+    */
+
+    'enable_gravatar_check' => env('EMAIL_VERIFICATION_GRAVATAR_CHECK', true),
+    // Note: gravatar_score_bonus moved to score_weights['gravatar_bonus'] for consistency
 
     /*
     |--------------------------------------------------------------------------

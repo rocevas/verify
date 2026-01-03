@@ -11,6 +11,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Process;
 use App\Services\MetricsService;
+use App\Services\GravatarService;
 
 class EmailVerificationService
 {
@@ -1200,6 +1201,32 @@ class EmailVerificationService
                     $result['score'] = $this->calculateScore($result['checks']);
                     // Catch-all servers don't get bonus - they're risky, not trusted
                     
+                    // Check Gravatar for catch-all emails (helps determine if email likely exists)
+                    if (config('email-verification.enable_gravatar_check', true)) {
+                        try {
+                            $gravatarService = app(GravatarService::class);
+                            $gravatar = $gravatarService->checkGravatar($email);
+                            
+                            if ($gravatar['has_gravatar'] ?? false) {
+                                // Email has Gravatar - more likely to exist (active user)
+                                $weights = $this->getScoreWeights();
+                                $gravatarBonus = $weights['gravatar_bonus'] ?? 5;
+                                $result['score'] = min(100, max(0, $result['score'] + $gravatarBonus)); // Clamp to 0-100
+                                $result['gravatar'] = true;
+                                $result['gravatar_url'] = $gravatar['gravatar_url'] ?? null;
+                            } else {
+                                $result['gravatar'] = false;
+                            }
+                        } catch (\Exception $e) {
+                            // Fail gracefully - if Gravatar check fails, just continue without it
+                            Log::debug('Gravatar check failed for catch-all email', [
+                                'email' => $email,
+                                'error' => $e->getMessage(),
+                            ]);
+                            $result['gravatar'] = false;
+                        }
+                    }
+                    
                     $result['error'] = null; // Clear any errors
                     $this->addDuration($result, $startTime);
                     // Determine state and result before saving
@@ -1266,6 +1293,33 @@ class EmailVerificationService
                         $result['status'] = config('email-verification.catch_all_status', 'catch_all');
                         // Don't override score - keep calculated score (matches Go behavior)
                         // Go skriptas doesn't change score for catch-all, it just sets status
+                        
+                        // Check Gravatar for catch-all emails (helps determine if email likely exists)
+                        if (config('email-verification.enable_gravatar_check', true)) {
+                            try {
+                                $gravatarService = app(GravatarService::class);
+                                $gravatar = $gravatarService->checkGravatar($email);
+                                
+                                if ($gravatar['has_gravatar'] ?? false) {
+                                    // Email has Gravatar - more likely to exist (active user)
+                                    $weights = $this->getScoreWeights();
+                                    $gravatarBonus = $weights['gravatar_bonus'] ?? 5;
+                                    $result['score'] = min(100, max(0, $result['score'] + $gravatarBonus)); // Clamp to 0-100
+                                    $result['gravatar'] = true;
+                                    $result['gravatar_url'] = $gravatar['gravatar_url'] ?? null;
+                                } else {
+                                    $result['gravatar'] = false;
+                                }
+                            } catch (\Exception $e) {
+                                // Fail gracefully - if Gravatar check fails, just continue without it
+                                Log::debug('Gravatar check failed for catch-all email', [
+                                    'email' => $email,
+                                    'error' => $e->getMessage(),
+                                ]);
+                                $result['gravatar'] = false;
+                            }
+                        }
+                        
                         $result['error'] = 'Catch-all server detected';
                         $this->addDuration($result, $startTime);
                         $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
@@ -1384,6 +1438,14 @@ class EmailVerificationService
             'free' => $result['free'] ?? $result['is_free'] ?? false,
             'mailbox_full' => $result['mailbox_full'] ?? false,
         ];
+        
+        // Add Gravatar fields if present (for catch-all emails)
+        if (isset($result['gravatar'])) {
+            $formatted['gravatar'] = $result['gravatar'];
+            if (isset($result['gravatar_url'])) {
+                $formatted['gravatar_url'] = $result['gravatar_url'];
+            }
+        }
 
         // Only include error if present
         if (!empty($result['error'])) {
@@ -1454,6 +1516,7 @@ class EmailVerificationService
                 'domain_validity' => $result['domain_validity'] ?? false,
                 'isp_esp' => $result['isp_esp'] ?? false,
                 'government_tld' => $result['government_tld'] ?? false,
+                'gravatar' => $result['gravatar'] ?? false,
                 'ai_analysis' => $result['ai_analysis'] ?? false,
                 'ai_insights' => $result['ai_insights'] ?? null,
                 'ai_confidence' => $result['ai_confidence'] ?? null,

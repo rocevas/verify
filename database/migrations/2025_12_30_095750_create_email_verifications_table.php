@@ -46,6 +46,7 @@ return new class extends Migration
             $table->boolean('is_free')->default(false);
             $table->boolean('isp_esp')->default(false);
             $table->boolean('government_tld')->default(false);
+            $table->boolean('gravatar')->default(false);
 
             $table->string('did_you_mean')->nullable();
             $table->string('alias_of')->nullable()->comment('Canonical email address if this is an alias');
