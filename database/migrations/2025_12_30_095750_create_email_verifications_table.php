@@ -22,6 +22,7 @@ return new class extends Migration
             $table->string('result')->nullable()->comment('Result: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error');
 //            $table->enum('result', ['valid', 'invalid', 'catch_all', 'unknown', 'spamtrap', 'abuse', 'do_not_mail', 'risky'])->default('unknown')->comment('Result: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error');
             $table->integer('score')->nullable();
+            $table->integer('email_score')->nullable();
             $table->string('source')->nullable();
             $table->string('email')->index();
             $table->string('account')->nullable();
@@ -49,12 +50,11 @@ return new class extends Migration
             $table->string('did_you_mean')->nullable();
 
             $table->timestamp('verified_at')->nullable();
-            $table->softDeletes();
+            $table->decimal('duration', 10, 2)->nullable()->comment('Verification duration in milliseconds');
             $table->timestamps();
 
             // Index for team-based queries (used in controllers)
             $table->index(['team_id', 'created_at']);
-            $table->index(['team_id', 'deleted_at']);
             // Index for user (informational only - to track who created it)
             $table->index('user_id');
             // Other indexes

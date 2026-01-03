@@ -121,14 +121,14 @@ const loadMessagesFromStorage = () => {
                     }
                     // If there are completed emails, show partial summary
                     if (msg.emails && msg.emails.length > 0) {
-                        const completed = msg.emails.filter(e => e.status === 'complete');
+                                const completed = msg.emails.filter(e => e.status === 'complete');
                         if (completed.length > 0) {
                             msg.showSummary = true;
                             msg.summary = {
                                 total: msg.emails.length,
-                                valid: completed.filter(e => e.result?.status === 'valid').length,
-                                invalid: completed.filter(e => e.result?.status === 'invalid').length,
-                                risky: completed.filter(e => ['catch_all', 'risky', 'do_not_mail'].includes(e.result?.status)).length,
+                                valid: completed.filter(e => (e.result?.state || e.result?.status) === 'deliverable' || (e.result?.result || e.result?.status) === 'valid').length,
+                                invalid: completed.filter(e => (e.result?.state || e.result?.status) === 'undeliverable' || (e.result?.result || e.result?.status) === 'invalid').length,
+                                risky: completed.filter(e => (e.result?.state || e.result?.status) === 'risky' || ['catch_all', 'risky', 'do_not_mail'].includes(e.result?.result || e.result?.status)).length,
                             };
                         }
                     }
@@ -691,16 +691,35 @@ const verifyFile = async (file) => {
 const formatResult = (result) => {
     if (!result) return 'Verification completed';
 
-    const statusEmoji = {
-        'valid': '✅',
-        'invalid': '❌',
+    const stateEmoji = {
+        'deliverable': '✅',
+        'undeliverable': '❌',
         'risky': '⚠️',
-        'catch_all': '🔶',
-        'do_not_mail': '🚫',
+        'unknown': '❓',
+        'error': '⚠️',
     };
 
-    let text = `${statusEmoji[result.status] || '📧'} **${result.email}**\n\n`;
-    text += `**Status:** ${result.status}\n`;
+    const resultEmoji = {
+        'valid': '✅',
+        'invalid': '❌',
+        'catch_all': '🔶',
+        'syntax_error': '❌',
+        'typo': '⚠️',
+        'disposable': '🚫',
+        'blocked': '🚫',
+        'mailbox_full': '⚠️',
+        'role': '⚠️',
+        'mailbox_not_found': '❌',
+    };
+
+    const displayState = result.state || result.status || 'unknown';
+    const displayResult = result.result || null;
+    
+    let text = `${stateEmoji[displayState] || resultEmoji[displayResult] || '📧'} **${result.email}**\n\n`;
+    text += `**State:** ${displayState}\n`;
+    if (displayResult) {
+        text += `**Result:** ${displayResult}\n`;
+    }
     text += `**Score:** ${result.score}/100\n\n`;
 
     text += `**Checks:**\n`;
@@ -842,7 +861,7 @@ onUnmounted(() => {
                     >
 
                         <div class=" rounded-2xl  max-w-[70%] text-base text-white leading-7"
-                             :class="[message.type === 'user' ? 'bg-white/5 px-4 py-1' : '']"
+                             :class="[message.type === 'user' ? 'bg-white/5 px-4 py-1' : 'mt-[1em] mb-[0.25em]']"
                         >
                             <!-- User message -->
                             <div v-if="message.type === 'user'" class="whitespace-pre-wrap">
@@ -853,7 +872,7 @@ onUnmounted(() => {
                             <div v-else class="space-y-2">
                                 <div class="flex items-start gap-2">
                                     <div class="flex-1">
-                                        <div class="whitespace-pre-wrap">{{ message.content }}</div>
+                                        <div class="whitespace-pre-wrap" v-html="message.content"></div>
                                         <!-- Progress indicator for batch -->
                                         <div v-if="message.isProcessing && message.emails && message.emails.length > 0" class="mt-2">
                                             <div class="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
@@ -865,13 +884,7 @@ onUnmounted(() => {
                                             </div>
                                         </div>
                                     </div>
-                                    <!-- Spinner for processing (single email) -->
-                                    <div v-if="message.isProcessing && !message.emails" class="flex-shrink-0">
-                                        <svg class="animate-spin h-5 w-5 text-indigo-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                                        </svg>
-                                    </div>
+
                                 </div>
 
                                 <!-- Steps (for single email) - show all steps with icons -->
@@ -904,17 +917,22 @@ onUnmounted(() => {
                                     <div class="p-4 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
                                         <div class="flex items-center justify-between mb-3">
                                             <h4 class="font-semibold text-base">{{ message.result.email }}</h4>
-                                            <span
-                                                :class="[
-                                                    'px-3 py-1 text-sm font-semibold rounded-full',
-                                                    message.result.status === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-                                                    message.result.status === 'invalid' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
-                                                    message.result.status === 'risky' ? 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200' :
-                                                    'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
-                                                ]"
-                                            >
-                                                {{ message.result.status }}
-                                            </span>
+                                            <div class="flex flex-col items-end gap-1">
+                                                <span
+                                                    :class="[
+                                                        'px-3 py-1 text-sm font-semibold rounded-full',
+                                                        (message.result.state || message.result.status) === 'deliverable' || (message.result.result || message.result.status) === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                                                        (message.result.state || message.result.status) === 'undeliverable' || (message.result.result || message.result.status) === 'invalid' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                                                        (message.result.state || message.result.status) === 'risky' ? 'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200' :
+                                                        'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200'
+                                                    ]"
+                                                >
+                                                    {{ message.result.state || message.result.status || 'unknown' }}
+                                                </span>
+                                                <span v-if="message.result.result && message.result.result !== (message.result.state || message.result.status)" class="text-xs text-gray-500 dark:text-gray-400">
+                                                    {{ message.result.result }}
+                                                </span>
+                                            </div>
                                         </div>
 
                                         <div class="grid grid-cols-2 gap-3 mb-3">
@@ -1052,18 +1070,18 @@ onUnmounted(() => {
                                                         </svg>
                                                         <span class="truncate">{{ emailItem.currentStep || 'Processing...' }}</span>
                                                     </div>
-                                                    <!-- Quick result preview -->
-                                                    <div v-else-if="emailItem.result" class="mt-1 flex items-center gap-2 text-xs">
-                                                        <span
-                                                            :class="[
-                                                                'px-2 py-0.5 rounded font-semibold',
-                                                                emailItem.result.status === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-                                                                emailItem.result.status === 'invalid' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
-                                                                'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200'
-                                                            ]"
-                                                        >
-                                                            {{ emailItem.result.status }}
-                                                        </span>
+                                                <!-- Quick result preview -->
+                                                <div v-else-if="emailItem.result" class="mt-1 flex items-center gap-2 text-xs">
+                                                    <span
+                                                        :class="[
+                                                            'px-2 py-0.5 rounded font-semibold',
+                                                            (emailItem.result.state || emailItem.result.status) === 'deliverable' || (emailItem.result.result || emailItem.result.status) === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                                                            (emailItem.result.state || emailItem.result.status) === 'undeliverable' || (emailItem.result.result || emailItem.result.status) === 'invalid' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                                                            'bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200'
+                                                        ]"
+                                                    >
+                                                        {{ emailItem.result.state || emailItem.result.status || 'unknown' }}
+                                                    </span>
                                                         <span class="text-gray-500">Score: {{ emailItem.result.score }}/100</span>
                                                         <span v-if="emailItem.result.ai_confidence !== null" class="text-purple-600">
                                                             AI: {{ emailItem.result.ai_confidence }}%

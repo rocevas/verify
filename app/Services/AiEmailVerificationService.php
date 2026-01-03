@@ -22,7 +22,7 @@ class AiEmailVerificationService
         $this->provider = config('services.ai.provider', 'ollama'); // Default to Ollama
         $this->model = config('services.ai.model', 'llama3.2');
         $this->baseUrl = config('services.ai.base_url', 'http://localhost:11434');
-        
+
         if ($this->provider === 'openai') {
             $this->apiKey = config('services.openai.key', '');
             $this->baseUrl = config('services.openai.base_url', 'https://api.openai.com/v1');
@@ -33,7 +33,7 @@ class AiEmailVerificationService
             $this->apiKey = '';
             $this->enabled = config('services.ai.enabled', true);
         }
-        
+
         // Log if AI is disabled (for debugging)
         if (!$this->enabled && config('app.debug')) {
             Log::info('AI Email Verification is disabled', [
@@ -59,7 +59,7 @@ class AiEmailVerificationService
     ): array {
         // Start timing
         $startTime = microtime(true);
-        
+
         $result = [
             'email' => $email,
             'status' => 'unknown',
@@ -110,7 +110,7 @@ class AiEmailVerificationService
         if ($streamCallback && $parts) {
             $streamCallback([
                 'type' => 'step',
-                'message' => "📧 Parsing email: {$parts['account']}@{$parts['domain']}",
+                'message' => "<div class='shrink-0 size-2 bg-current animate-ping rounded-full inline-block -mt-0.5 mr-1'></div> Parsing email: {$parts['account']}@{$parts['domain']}",
                 'step' => 'parsing',
             ]);
         }
@@ -118,7 +118,7 @@ class AiEmailVerificationService
         // Run traditional checks with streaming support
         // Set timeout for traditional verification
         set_time_limit(90); // 90 seconds for traditional checks
-        
+
         $traditionalResult = $this->traditionalService->verify(
             $email,
             $userId,
@@ -135,26 +135,26 @@ class AiEmailVerificationService
                 'message' => ($traditionalResult['syntax'] ?? false) ? '✅ Syntax check: Valid format' : '❌ Syntax check: Invalid format',
                 'step' => 'syntax_check',
             ]);
-            
+
             if ($parts) {
                 $streamCallback([
                     'type' => 'step',
                     'message' => ($traditionalResult['disposable'] ?? false) ? '⚠️ Disposable email detected' : '✅ Not a disposable email',
                     'step' => 'disposable_check',
                 ]);
-                
+
                 $streamCallback([
                     'type' => 'step',
                     'message' => ($traditionalResult['role'] ?? false) ? '⚠️ Role-based email (info@, support@, etc.)' : '✅ Not a role-based email',
                     'step' => 'role_check',
                 ]);
-                
+
                 $streamCallback([
                     'type' => 'step',
                     'message' => ($traditionalResult['mx_record'] ?? false) ? '✅ MX records found' : '❌ No MX records found',
                     'step' => 'mx_check',
                 ]);
-                
+
                 if ($traditionalResult['mx_record'] ?? false) {
                     $streamCallback([
                         'type' => 'step',
@@ -167,12 +167,15 @@ class AiEmailVerificationService
 
         // Merge traditional results
         $result = array_merge($result, $traditionalResult);
-        
+
+        // email_score is traditional email verification score (MX, blacklist, SMTP, etc.)
+        $result['email_score'] = $traditionalResult['score'] ?? 0;
+
         // Ensure checks array has all keys from traditional result
         if (isset($traditionalResult['checks'])) {
             $result['checks'] = array_merge($result['checks'] ?? [], $traditionalResult['checks']);
         }
-        
+
         // Ensure mx_record key is synced
         if (isset($result['mx_record'])) {
             $result['checks']['mx_record'] = $result['mx_record'];
@@ -207,7 +210,7 @@ class AiEmailVerificationService
         if (isset($result['government_tld'])) {
             $result['checks']['government_tld'] = $result['government_tld'];
         }
-        
+
         $result['ai_analysis'] = false;
 
         // Stream: Traditional checks complete
@@ -233,7 +236,7 @@ class AiEmailVerificationService
                     'message' => '🤖 Connecting to AI model...',
                     'step' => 'ai_connecting',
                 ]);
-                
+
                 $streamCallback([
                     'type' => 'step',
                     'message' => '🧠 Analyzing email with AI (this may take a few seconds)...',
@@ -243,8 +246,9 @@ class AiEmailVerificationService
 
             try {
                 $aiResult = $this->analyzeWithAi($email, $traditionalResult);
-                
+
                 if ($aiResult) {
+                    $result['ai_analysis'] = true; // Mark that AI analysis was performed
                     $result['ai_insights'] = $aiResult['insights'] ?? null;
                     $result['ai_confidence'] = $aiResult['confidence'] ?? null;
                     $result['ai_risk_factors'] = $aiResult['risk_factors'] ?? [];
@@ -256,7 +260,7 @@ class AiEmailVerificationService
                         // Mark specific risk factors in checks
                         if (in_array('typo_domain', $riskFactors) && !($result['typo_domain'] ?? false)) {
                             $result['checks']['ai_detected_typo'] = true;
-                            
+
                             // If AI detected typo and provided correction, use it
                             if (isset($aiResult['did_you_mean']) && !isset($result['did_you_mean'])) {
                                 $result['did_you_mean'] = $aiResult['did_you_mean'];
@@ -276,7 +280,7 @@ class AiEmailVerificationService
                             $result['checks']['ai_low_reputation'] = true;
                         }
                     }
-                    
+
                     // If traditional service already detected typo and has correction, use it
                     if ($result['typo_domain'] ?? false && !isset($result['did_you_mean'])) {
                         // Correction should already be in result from traditional service
@@ -295,71 +299,76 @@ class AiEmailVerificationService
                         $domain = strtolower($parts[1] ?? '');
                         $publicProviders = ['gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'mail.ru', 'yandex.com', 'aol.com', 'icloud.com'];
                         $isPublicProvider = in_array($domain, $publicProviders, true);
-                        
+
                         // Check if this is a test domain
                         $testDomains = ['test.com', 'example.com', 'example.org', 'example.net', 'test.org', 'test.net'];
                         $isTestDomain = in_array($domain, $testDomains, true);
-                        
+
                         // Check if domain is an IP address
                         $isIpAddress = preg_match('/^\[?(\d{1,3}\.){3}\d{1,3}\]?$/', $domain) === 1;
-                        
+
                         // Check if domain has invalid TLD
                         $isInvalidTld = str_ends_with($domain, '.invalid');
-                        
+
                         // Check if disposable email
                         $isDisposable = $result['disposable'] ?? false;
                         $disposableServiceDomains = ['guerrillamail.com', '10minutemail.com', 'mailinator.com', 'tempmail.com', 'throwaway.email', 'getnada.com', 'mohmal.com', 'trashmail.com'];
                         $isDisposableService = in_array($domain, $disposableServiceDomains, true);
+
+                        // Calculate final score by blending email_score and AI confidence
+                        $emailScore = $result['email_score'] ?? 0;
+                        $aiConfidence = $aiResult['confidence'];
                         
-                        // For public providers with MX records, ensure high score
+                        // For public providers with MX records, ensure high final score
                         if ($isPublicProvider && ($result['mx_record'] ?? false)) {
-                            // Public provider with MX records should have high score (90-100)
-                            // Use AI confidence if it's high, otherwise use traditional score or minimum 90
-                            $result['score'] = max(90, max($result['score'], $aiResult['confidence']));
+                            // Public provider with MX records should have high final score (90-100)
+                            $result['score'] = max(90, max($emailScore, $aiConfidence));
                         } elseif ($isTestDomain || $isIpAddress || $isInvalidTld) {
-                            // Test domains, IP addresses, and invalid TLD should have low scores (0-30)
-                            // Use AI confidence if it's low, otherwise cap at 30
-                            $result['score'] = min(30, min($result['score'], $aiResult['confidence']));
+                            // Test domains, IP addresses, and invalid TLD should have low final scores (0-30)
+                            $result['score'] = min(30, min($emailScore, $aiConfidence));
                         } elseif ($isDisposable || $isDisposableService) {
-                            // Disposable emails should have low scores (0-40)
-                            $result['score'] = min(40, min($result['score'], $aiResult['confidence']));
+                            // Disposable emails should have low final scores (0-40)
+                            $result['score'] = min(40, min($emailScore, $aiConfidence));
                         } else {
-                            // AI confidence is 0-100, blend with traditional score
+                            // AI confidence is 0-100, blend with email_score
                             $aiWeight = 0.3; // 30% weight for AI
-                            $traditionalWeight = 0.7; // 70% weight for traditional
+                            $emailWeight = 0.7; // 70% weight for email_score
                             $result['score'] = (int) round(
-                                ($result['score'] * $traditionalWeight) + 
-                                ($aiResult['confidence'] * $aiWeight)
+                                ($emailScore * $emailWeight) +
+                                ($aiConfidence * $aiWeight)
                             );
                         }
+                    } else {
+                        // No AI confidence, score equals email_score
+                        $result['score'] = $result['email_score'] ?? 0;
                     }
 
                     // Use AI suggested status more aggressively if AI is confident
                     if ($aiResult['suggested_status'] && $aiResult['confidence'] !== null) {
                         $aiConfidence = $aiResult['confidence'];
                         $currentStatus = $result['status'];
-                        
+
                         // Check if this is a public provider email
                         $parts = explode('@', $email, 2);
                         $domain = strtolower($parts[1] ?? '');
                         $publicProviders = ['gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'mail.ru', 'yandex.com', 'aol.com', 'icloud.com'];
                         $isPublicProvider = in_array($domain, $publicProviders, true);
-                        
+
                         // Check if this is a test domain
                         $testDomains = ['test.com', 'example.com', 'example.org', 'example.net', 'test.org', 'test.net'];
                         $isTestDomain = in_array($domain, $testDomains, true);
-                        
+
                         // Check if domain is an IP address
                         $isIpAddress = preg_match('/^\[?(\d{1,3}\.){3}\d{1,3}\]?$/', $domain) === 1;
-                        
+
                         // Check if domain has invalid TLD
                         $isInvalidTld = str_ends_with($domain, '.invalid');
-                        
+
                         // Check if disposable email
                         $isDisposable = $result['disposable'] ?? false;
                         $disposableServiceDomains = ['guerrillamail.com', '10minutemail.com', 'mailinator.com', 'tempmail.com', 'throwaway.email', 'getnada.com', 'mohmal.com', 'trashmail.com'];
                         $isDisposableService = in_array($domain, $disposableServiceDomains, true);
-                        
+
                         // Protect public provider emails: never override 'valid' status for public providers
                         if ($isPublicProvider && $currentStatus === 'valid') {
                             // Public provider emails that are already marked as valid should stay valid
@@ -406,16 +415,16 @@ class AiEmailVerificationService
                                 'invalid' => 5,
                                 'spamtrap' => 6,
                             ];
-                            
+
                             $currentSeverity = $statusSeverity[$currentStatus] ?? 0;
                             $aiSeverity = $statusSeverity[$aiResult['suggested_status']] ?? 0;
-                            
+
                             // Override if AI suggests more severe status (e.g., invalid vs risky)
                             // or if current status is uncertain (unknown, risky, catch_all)
                             // BUT: Never override 'valid' to 'do_not_mail' or 'invalid' for public providers
                             // BUT: Never override invalid status for test domains, IP addresses, invalid TLD
                             $shouldBlockOverride = false;
-                            
+
                             if ($isPublicProvider && $currentStatus === 'valid' && in_array($aiResult['suggested_status'], ['do_not_mail', 'invalid'])) {
                                 $shouldBlockOverride = true;
                                 Log::debug('AI status override blocked - public provider should stay valid', [
@@ -423,7 +432,7 @@ class AiEmailVerificationService
                                     'ai_suggested' => $aiResult['suggested_status'],
                                 ]);
                             }
-                            
+
                             if (($isTestDomain || $isIpAddress || $isInvalidTld) && $currentStatus === 'invalid' && $aiResult['suggested_status'] !== 'invalid') {
                                 $shouldBlockOverride = true;
                                 Log::debug('AI status override blocked - invalid domain type should stay invalid', [
@@ -431,7 +440,7 @@ class AiEmailVerificationService
                                     'ai_suggested' => $aiResult['suggested_status'],
                                 ]);
                             }
-                            
+
                             if (!$shouldBlockOverride && ($aiSeverity > $currentSeverity || in_array($currentStatus, ['unknown', 'risky', 'catch_all']))) {
                                 $result['status'] = $aiResult['suggested_status'];
                                 Log::info('AI status override', [
@@ -498,10 +507,16 @@ class AiEmailVerificationService
             }
         }
 
+        // If score is not set (AI not used or failed), set it to email_score
+        // score = email_score when AI is not used
+        if (!isset($result['score'])) {
+            $result['score'] = $result['email_score'] ?? 0;
+        }
+
         // Calculate duration
         $endTime = microtime(true);
-        $result['duration'] = round(($endTime - $startTime) * 1000, 2); // Duration in milliseconds
-        
+        $result['duration'] = round($endTime - $startTime, 2); // Duration in seconds (rounded to 2 decimal places)
+
         // Determine state and result (traditional service should have set it, but ensure it's set)
         if (!isset($result['state']) || !isset($result['result'])) {
             // Use reflection to call traditional service's method, or implement same logic
@@ -509,7 +524,7 @@ class AiEmailVerificationService
             $result['state'] = $stateAndResult['state'];
             $result['result'] = $stateAndResult['result'];
         }
-        
+
         // Save verification with AI data (traditional service already saved it, so we update)
         $this->updateVerificationWithAi($email, $result, $userId, $teamId);
 
@@ -530,7 +545,7 @@ class AiEmailVerificationService
     private function analyzeWithAi(string $email, array $traditionalResult): ?array
     {
         $cacheKey = "ai_analysis_" . md5($email . json_encode($traditionalResult) . $this->provider);
-        
+
         return Cache::remember($cacheKey, 3600, function () use ($email, $traditionalResult) {
             try {
                 $prompt = $this->buildPrompt($email, $traditionalResult);
@@ -700,41 +715,41 @@ class AiEmailVerificationService
         $parts = explode('@', $email, 2);
         $localPart = $parts[0] ?? '';
         $domain = $parts[1] ?? '';
-        
+
         // Check if email contains '+' character
         $hasPlus = str_contains($localPart, '+');
-        
+
         // Determine if domain is a public provider
         $publicProviders = ['gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'mail.ru', 'yandex.com', 'aol.com', 'icloud.com'];
         $isPublicProvider = in_array(strtolower($domain), $publicProviders, true);
-        
+
         // Check if domain is a typo domain (common misspellings of public providers)
         $typoDomains = config('email-verification.typo_domains', []);
         $isTypoDomain = in_array(strtolower($domain), $typoDomains, true);
-        
+
         // Check if domain is a test domain (should be marked as invalid)
         $testDomains = ['test.com', 'example.com', 'example.org', 'example.net', 'test.org', 'test.net'];
         $isTestDomain = in_array(strtolower($domain), $testDomains, true);
-        
+
         // Check if domain is an IP address (e.g., [192.168.1.1])
         $isIpAddress = preg_match('/^\[?(\d{1,3}\.){3}\d{1,3}\]?$/', $domain) === 1;
-        
+
         // Check if domain has invalid TLD (.invalid is reserved)
         $isInvalidTld = str_ends_with(strtolower($domain), '.invalid');
-        
+
         // Check if disposable email
         $isDisposable = $traditionalResult['disposable'] ?? false;
-        
+
         // Check for known disposable email service domains
         $disposableServiceDomains = ['guerrillamail.com', '10minutemail.com', 'mailinator.com', 'tempmail.com', 'throwaway.email', 'getnada.com', 'mohmal.com', 'trashmail.com'];
         $isDisposableService = in_array(strtolower($domain), $disposableServiceDomains, true);
 
         $smtpStatus = $traditionalResult['smtp'] ?? false
-            ? 'PASS' 
-            : ($traditionalResult['status'] === 'valid' && $traditionalResult['score'] >= 90 
-                ? 'SKIPPED (public provider - known valid)' 
+            ? 'PASS'
+            : ($traditionalResult['status'] === 'valid' && $traditionalResult['score'] >= 90
+                ? 'SKIPPED (public provider - known valid)'
                 : 'FAIL');
-        
+
         // Build context notes only for relevant cases
         $contextNotes = [];
         if ($isPublicProvider) {
@@ -760,8 +775,8 @@ class AiEmailVerificationService
         if ($hasPlus) {
             $contextNotes[] = "This email contains a '+' character in the local part, which is VALID according to RFC 5322 and commonly used for email aliasing. This is NOT a problem.";
         }
-        
-        $contextSection = !empty($contextNotes) 
+
+        $contextSection = !empty($contextNotes)
             ? "\n\n🚨 CRITICAL CONTEXT - READ CAREFULLY:\n" . implode("\n", array_map(fn($note) => "- " . $note, $contextNotes))
             : '';
 
@@ -887,7 +902,7 @@ Focus on:
     {
         $currentStatus = $result['status'] ?? 'unknown';
         $error = $result['error'] ?? null;
-        
+
         // Check for syntax error first (highest priority)
         if (!($result['syntax'] ?? false)) {
             return [
@@ -895,7 +910,7 @@ Focus on:
                 'result' => 'syntax_error',
             ];
         }
-        
+
         // Check for typo domain
         if ($result['typo_domain'] ?? false) {
             return [
@@ -903,7 +918,7 @@ Focus on:
                 'result' => 'typo',
             ];
         }
-        
+
         // Check for disposable email
         if ($result['disposable'] ?? false) {
             return [
@@ -911,7 +926,7 @@ Focus on:
                 'result' => 'disposable',
             ];
         }
-        
+
         // Check for blacklist/blocked
         if ($result['blacklist'] ?? false || $currentStatus === 'spamtrap' || $currentStatus === 'abuse' || $currentStatus === 'do_not_mail') {
             return [
@@ -919,7 +934,7 @@ Focus on:
                 'result' => 'blocked',
             ];
         }
-        
+
         // Check for mailbox full
         if ($result['mailbox_full'] ?? false) {
             return [
@@ -927,7 +942,7 @@ Focus on:
                 'result' => 'mailbox_full',
             ];
         }
-        
+
         // Check for role-based email
         if ($result['role'] ?? false) {
             return [
@@ -935,7 +950,7 @@ Focus on:
                 'result' => 'role',
             ];
         }
-        
+
         // Check for catch-all
         if ($currentStatus === 'catch_all') {
             return [
@@ -943,7 +958,7 @@ Focus on:
                 'result' => 'catch_all',
             ];
         }
-        
+
         // Check for valid email (SMTP verified or high confidence)
         if ($result['smtp'] ?? false) {
             return [
@@ -951,7 +966,7 @@ Focus on:
                 'result' => 'valid',
             ];
         }
-        
+
         // If MX records exist and domain is valid, but SMTP not checked (public providers)
         if (($result['mx_record'] ?? false) && ($result['domain_validity'] ?? false) && $currentStatus === 'valid') {
             return [
@@ -959,7 +974,7 @@ Focus on:
                 'result' => 'valid',
             ];
         }
-        
+
         // Check for invalid domain or no MX records
         if (!($result['mx_record'] ?? false) || !($result['domain_validity'] ?? false)) {
             if ($currentStatus === 'invalid') {
@@ -969,7 +984,7 @@ Focus on:
                 ];
             }
         }
-        
+
         // Check for connection/timeout errors
         if ($error && (
             str_contains(strtolower($error), 'timeout') ||
@@ -982,7 +997,7 @@ Focus on:
                 'result' => null,
             ];
         }
-        
+
         // Check for unexpected errors
         if ($error && $currentStatus === 'unknown') {
             return [
@@ -990,7 +1005,7 @@ Focus on:
                 'result' => 'error',
             ];
         }
-        
+
         // Default: unknown
         if ($currentStatus === 'unknown') {
             return [
@@ -998,7 +1013,7 @@ Focus on:
                 'result' => null,
             ];
         }
-        
+
         // Fallback: map old status to new format
         return [
             'state' => match($currentStatus) {
@@ -1017,7 +1032,7 @@ Focus on:
             },
         ];
     }
-    
+
     /**
      * Get typo correction for a domain
      * Uses the traditional service's typo correction logic
@@ -1027,35 +1042,35 @@ Focus on:
         // Use reflection to access private method, or create a public wrapper
         // For now, let's implement a simple version here
         $domainLower = strtolower($domain);
-        
+
         // Check known typo corrections from config
         $typoCorrections = config('email-verification.typo_corrections', []);
         if (isset($typoCorrections[$domainLower])) {
             return $typoCorrections[$domainLower];
         }
-        
+
         // Try to find correction using fuzzy matching
         $publicProviders = ['gmail.com', 'googlemail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'live.com', 'msn.com', 'mail.ru', 'yandex.com', 'aol.com', 'icloud.com'];
         $maxDistance = 2;
         $minSimilarity = 0.85;
-        
+
         $bestMatch = null;
         $bestSimilarity = 0;
-        
+
         foreach ($publicProviders as $providerDomain) {
             if ($domainLower === $providerDomain) {
                 continue;
             }
-            
+
             $distance = levenshtein($domainLower, $providerDomain);
             $maxLen = max(strlen($domainLower), strlen($providerDomain));
-            
+
             if ($maxLen === 0) {
                 continue;
             }
-            
+
             $similarity = 1 - ($distance / $maxLen);
-            
+
             if ($distance <= $maxDistance && $similarity >= $minSimilarity) {
                 if ($similarity > $bestSimilarity) {
                     $bestSimilarity = $similarity;
@@ -1063,10 +1078,10 @@ Focus on:
                 }
             }
         }
-        
+
         return $bestMatch;
     }
-    
+
     /**
      * Update existing verification with AI data
      */
@@ -1085,7 +1100,8 @@ Focus on:
 
             if ($verification) {
                 $updateData = [
-                    'score' => $result['score'],
+                    'email_score' => $result['email_score'] ?? null, // Traditional email verification score (MX, blacklist, SMTP, etc.)
+                    'score' => $result['score'] ?? null, // Final score (email_score + ai_confidence if AI is used, otherwise email_score)
                     'state' => $result['state'] ?? 'unknown',
                     'result' => $result['result'] ?? null,
                     'ai_analysis' => $result['ai_analysis'] ?? false,
@@ -1106,6 +1122,7 @@ Focus on:
                     'domain_validity' => $result['domain_validity'] ?? false,
                     'isp_esp' => $result['isp_esp'] ?? false,
                     'government_tld' => $result['government_tld'] ?? false,
+                    'duration' => $result['duration'] ?? null, // Verification duration in seconds (rounded to 2 decimal places)
                 ];
 
                 $verification->update($updateData);

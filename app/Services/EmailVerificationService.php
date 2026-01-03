@@ -771,7 +771,7 @@ class EmailVerificationService
     private function addDuration(array &$result, float $startTime): void
     {
         $endTime = microtime(true);
-        $result['duration'] = round(($endTime - $startTime) * 1000, 2); // Duration in milliseconds
+        $result['duration'] = round($endTime - $startTime, 2); // Duration in seconds (rounded to 2 decimal places)
     }
     
     /**
@@ -1240,6 +1240,11 @@ class EmailVerificationService
             $result['status'] = 'unknown';
             $result['error'] = $e->getMessage();
             
+            // Determine state and result even on error
+            $stateAndResult = $this->determineStateAndResult($result);
+            $result['state'] = $stateAndResult['state'];
+            $result['result'] = $stateAndResult['result'];
+            
             // Try to save even on error
             try {
                 $parts = $this->parseEmail($email);
@@ -1292,7 +1297,9 @@ class EmailVerificationService
                 'ai_confidence' => $result['ai_confidence'] ?? null,
                 'ai_risk_factors' => $result['ai_risk_factors'] ?? null,
                 'did_you_mean' => $result['did_you_mean'] ?? null,
-                'score' => $result['score'] ?? null,
+                'email_score' => $result['score'] ?? null, // Traditional email verification score (MX, blacklist, SMTP, etc.)
+                'score' => null, // Will be calculated by AI service if AI is used (email_score + ai_confidence), otherwise equals email_score
+                'duration' => $result['duration'] ?? null, // Verification duration in seconds (rounded to 2 decimal places)
                 'verified_at' => now(),
             ]);
             

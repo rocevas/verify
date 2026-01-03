@@ -101,18 +101,32 @@ const openBulkJob = (bulkJobId) => {
 
 const getStatusColor = (status) => {
     const colors = {
+        // State values
+        deliverable: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
+        undeliverable: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        risky: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+        unknown: 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200',
+        error: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        // Result values
         valid: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
         invalid: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
-        risky: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
         catch_all: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+        syntax_error: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        typo: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        disposable: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        blocked: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        mailbox_full: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+        role: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200',
+        mailbox_not_found: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+        // Legacy status values (for backward compatibility)
         do_not_mail: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
-        unknown: 'bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200',
     };
     return colors[status] || colors.unknown;
 };
 
 const getStatusBadge = (status) => {
-    return status.charAt(0).toUpperCase() + status.slice(1).replace('_', ' ');
+    if (!status) return 'Unknown';
+    return status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, ' ');
 };
 
 onMounted(() => {

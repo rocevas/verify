@@ -201,7 +201,9 @@ class DashboardController extends Controller
                     'email' => $verification->email,
                     'state' => $verification->state,
                     'result' => $verification->result,
-                    'score' => $verification->score,
+                    'score' => $verification->score, // Traditional email verification score
+                    'ai_confidence' => $verification->ai_confidence, // AI score
+                    'final_score' => $verification->final_score, // Combined score (score + ai_confidence)
                     'checks' => $checks,
                     'created_at' => $verification->created_at?->toIso8601String() ?? $verification->created_at,
                 ];
@@ -257,9 +259,10 @@ class DashboardController extends Controller
                     'email' => $verification->email,
                     'state' => $verification->state,
                     'result' => $verification->result,
-                    'score' => $verification->score,
+                    'email_score' => $verification->email_score, // Traditional email verification score (MX, blacklist, SMTP, etc.)
+                    'ai_confidence' => $verification->ai_confidence ?? null, // AI score
+                    'score' => $verification->score, // Final score (email_score + ai_confidence if AI is used, otherwise email_score)
                     'checks' => $checks,
-                    'ai_confidence' => $verification->ai_confidence ?? null,
                     'ai_insights' => $verification->ai_insights ?? null,
                     'created_at' => $verification->created_at,
                 ];
@@ -382,9 +385,10 @@ class DashboardController extends Controller
                 'email' => $verification->email,
                 'state' => $verification->state,
                 'result' => $verification->result,
-                'score' => $verification->score,
+                'score' => $verification->score, // Traditional email verification score
+                'ai_confidence' => $verification->ai_confidence ?? null, // AI score
+                'final_score' => $verification->final_score, // Combined score (score + ai_confidence)
                 'checks' => $checks,
-                'ai_confidence' => $verification->ai_confidence ?? null,
                 'ai_insights' => $verification->ai_insights ?? null,
                 'created_at' => $verification->created_at?->toIso8601String(),
             ];
@@ -441,10 +445,11 @@ class DashboardController extends Controller
                 'email' => $emailVerification->email,
                 'state' => $emailVerification->state,
                 'result' => $emailVerification->result,
-                'score' => $emailVerification->score,
+                'email_score' => $emailVerification->email_score, // Traditional email verification score (MX, blacklist, SMTP, etc.)
+                'ai_confidence' => $emailVerification->ai_confidence ?? null, // AI score
+                'score' => $emailVerification->score, // Final score (email_score + ai_confidence if AI is used, otherwise email_score)
                 'checks' => $checks,
                 'ai_analysis' => $emailVerification->ai_analysis ?? false,
-                'ai_confidence' => $emailVerification->ai_confidence ?? null,
                 'ai_insights' => $emailVerification->ai_insights ?? null,
                 'ai_risk_factors' => $emailVerification->ai_risk_factors ?? null,
                 'source' => $emailVerification->source,

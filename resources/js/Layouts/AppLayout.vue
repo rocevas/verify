@@ -95,11 +95,26 @@ const formatDate = (dateString) => {
 
 const getStatusColor = (status) => {
     const colors = {
+        // State values
+        'deliverable': 'text-green-600 dark:text-green-400',
+        'undeliverable': 'text-red-600 dark:text-red-400',
+        'risky': 'text-yellow-600 dark:text-yellow-400',
+        'unknown': 'text-gray-600 dark:text-gray-400',
+        'error': 'text-red-600 dark:text-red-400',
+        // Result values
         'valid': 'text-green-600 dark:text-green-400',
         'invalid': 'text-red-600 dark:text-red-400',
-        'risky': 'text-yellow-600 dark:text-yellow-400',
         'catch_all': 'text-yellow-600 dark:text-yellow-400',
+        'syntax_error': 'text-red-600 dark:text-red-400',
+        'typo': 'text-red-600 dark:text-red-400',
+        'disposable': 'text-red-600 dark:text-red-400',
+        'blocked': 'text-red-600 dark:text-red-400',
+        'mailbox_full': 'text-yellow-600 dark:text-yellow-400',
+        'role': 'text-yellow-600 dark:text-yellow-400',
+        'mailbox_not_found': 'text-red-600 dark:text-red-400',
+        // Legacy status values (for backward compatibility)
         'do_not_mail': 'text-yellow-600 dark:text-yellow-400',
+        // Bulk job statuses
         'processing': 'text-blue-600 dark:text-blue-400',
         'pending': 'text-gray-600 dark:text-gray-400',
         'completed': 'text-green-600 dark:text-green-400',

@@ -111,7 +111,9 @@ class EmailVerificationController extends Controller
                 'email' => $verification->email,
                 'state' => $verification->state,
                 'result' => $verification->result,
-                'score' => $verification->score,
+                'email_score' => $verification->email_score, // Traditional email verification score (MX, blacklist, SMTP, etc.)
+                'ai_confidence' => $verification->ai_confidence, // AI score
+                'score' => $verification->score, // Final score (email_score + ai_confidence if AI is used, otherwise email_score)
                 'checks' => $this->buildChecksArray($verification),
                 'source' => $verification->source,
                 'created_at' => $verification->created_at?->toIso8601String(),

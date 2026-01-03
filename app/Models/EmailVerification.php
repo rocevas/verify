@@ -5,12 +5,11 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Str;
 
 class EmailVerification extends Model
 {
-    use HasUuids, SoftDeletes;
+    use HasUuids;
 
     protected static function boot()
     {
@@ -57,7 +56,8 @@ class EmailVerification extends Model
         'domain',
         'state', // enum: deliverable, undeliverable, risky, unknown, error
         'result', // string: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error
-        'score',
+        'score', // Final score (email_score + ai_confidence if AI is used, otherwise email_score)
+        'email_score', // Traditional email verification score (MX, blacklist, SMTP checks, etc.)
         'ai_analysis',
         'ai_insights',
         'ai_confidence',
@@ -77,6 +77,7 @@ class EmailVerification extends Model
         'government_tld',
         'did_you_mean',
         'verified_at',
+        'duration', // Verification duration in seconds (rounded to 2 decimal places)
     ];
 
     protected $casts = [
@@ -112,7 +113,7 @@ class EmailVerification extends Model
     public function resolveRouteBinding($value, $field = null)
     {
         $field = $field ?: $this->getRouteKeyName();
-        
+
         // If field is 'uuid' but value looks like an integer (not a UUID format),
         // try to find by id first for backward compatibility
         // UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (contains dashes)
@@ -120,7 +121,7 @@ class EmailVerification extends Model
             // Check if value is numeric and not a valid UUID format
             $isNumeric = is_numeric($value);
             $isValidUuid = preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i', $value) === 1;
-            
+
             if ($isNumeric && !$isValidUuid) {
                 // Try to find by integer ID first (for backward compatibility)
                 $model = $this->where('id', (int)$value)->first();
@@ -129,7 +130,7 @@ class EmailVerification extends Model
                 }
             }
         }
-        
+
         return $this->where($field, $value)->first();
     }
 
@@ -146,6 +147,30 @@ class EmailVerification extends Model
     public function bulkVerificationJob(): BelongsTo
     {
         return $this->belongsTo(BulkVerificationJob::class);
+    }
+
+    /**
+     * Get the final score (combined email_score + AI score)
+     * If score is not set, calculates it from email_score + ai_confidence
+     */
+    public function getScoreAttribute($value)
+    {
+        // If score is already set, return it
+        if ($value !== null) {
+            return $value;
+        }
+
+        // Calculate score from email_score + ai_confidence (AI)
+        $emailScore = $this->attributes['email_score'] ?? 0;
+        $aiConfidence = $this->attributes['ai_confidence'] ?? null;
+
+        if ($aiConfidence !== null) {
+            // Combine: 70% email_score + 30% AI
+            return (int) round(($emailScore * 0.7) + ($aiConfidence * 0.3));
+        }
+
+        // If no AI confidence, score equals email_score
+        return $emailScore;
     }
 
     // api_key_id now stores Sanctum token ID for reference

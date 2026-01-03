@@ -284,11 +284,11 @@ const clearCsvForm = () => {
                                                 <td class="px-6 py-4 whitespace-nowrap">
                                                     <span :class="[
                                                         'px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full',
-                                                        result.status === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-                                                        result.status === 'invalid' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
+                                                        (result.state || result.status) === 'deliverable' || (result.result || result.status) === 'valid' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
+                                                        (result.state || result.status) === 'undeliverable' || (result.result || result.status) === 'invalid' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
                                                         'bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200'
                                                     ]">
-                                                        {{ result.status.charAt(0).toUpperCase() + result.status.slice(1) }}
+                                                        {{ ((result.state || result.result || result.status) || 'unknown').charAt(0).toUpperCase() + ((result.state || result.result || result.status) || 'unknown').slice(1).replace(/_/g, ' ') }}
                                                     </span>
                                                 </td>
                                                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
