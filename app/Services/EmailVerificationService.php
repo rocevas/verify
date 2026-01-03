@@ -366,12 +366,17 @@ class EmailVerificationService
         
         return Cache::remember($cacheKey, $ttl, function () {
             $domains = [];
-            $providers = config('email-verification.public_providers', []);
             
+            // Get domains from public_providers config (structured providers with MX patterns)
+            $providers = config('email-verification.public_providers', []);
             foreach ($providers as $providerConfig) {
                 $providerDomains = $providerConfig['domains'] ?? [];
                 $domains = array_merge($domains, $providerDomains);
             }
+            
+            // Get domains from free-email-providers config (imported from Go email-verifier)
+            $freeEmailProviders = config('free-email-providers.domains', []);
+            $domains = array_merge($domains, $freeEmailProviders);
             
             return array_unique($domains);
         });
