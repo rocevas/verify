@@ -28,9 +28,36 @@ return [
     | Maximum time in seconds to wait for SMTP server response.
     | Lower values = faster but may miss valid emails on slow servers.
     |
+    | Note: For backward compatibility, this is used as default for both
+    | connect and operation timeouts if they are not specified separately.
+    |
     */
 
     'smtp_timeout' => env('EMAIL_VERIFICATION_SMTP_TIMEOUT', 3), // Reduced from 5 to 3 seconds for better UX
+
+    /*
+    |--------------------------------------------------------------------------
+    | SMTP Connect Timeout
+    |--------------------------------------------------------------------------
+    |
+    | Maximum time in seconds to wait when establishing TCP connection to SMTP server.
+    | This is separate from operation timeout to allow faster failure detection.
+    |
+    */
+
+    'smtp_connect_timeout' => env('EMAIL_VERIFICATION_SMTP_CONNECT_TIMEOUT', 3), // Connection timeout (faster failure)
+
+    /*
+    |--------------------------------------------------------------------------
+    | SMTP Operation Timeout
+    |--------------------------------------------------------------------------
+    |
+    | Maximum time in seconds to wait for SMTP operations (EHLO, MAIL FROM, RCPT TO, etc.).
+    | This allows more time for operations while keeping connection timeout short.
+    |
+    */
+
+    'smtp_operation_timeout' => env('EMAIL_VERIFICATION_SMTP_OPERATION_TIMEOUT', 6), // Operation timeout (can be longer)
 
     /*
     |--------------------------------------------------------------------------
@@ -402,7 +429,7 @@ return [
         'gmail.com',
         'google.com',
         'googlemail.com',
-        
+
         // Yahoo
         'yahoo.com',
         'yahoo.co.uk',
@@ -424,7 +451,7 @@ return [
         'yahoo.org',
         'ymail.com',
         'rocketmail.com',
-        
+
         // Microsoft/Outlook
         'outlook.com',
         'outlook.fr',
@@ -452,14 +479,14 @@ return [
         'msn.com',
         'passport.com',
         'passport.net',
-        
+
         // Mail.ru
         'mail.ru',
         'inbox.ru',
         'list.ru',
         'bk.ru',
         'internet.ru',
-        
+
         // Yandex
         'yandex.com',
         'yandex.ru',
@@ -467,53 +494,53 @@ return [
         'yandex.by',
         'yandex.kz',
         'ya.ru',
-        
+
         // AOL
         'aol.com',
         'aol.fr',
         'aol.de',
         'aol.co.uk',
-        
+
         // Apple/iCloud
         'icloud.com',
         'icloud.com.cn',
         'me.com',
         'mac.com',
-        
+
         // ProtonMail
         'protonmail.com',
         'proton.me',
         'pm.me',
-        
+
         // Zoho
         'zoho.com',
         'zoho.eu',
         'zoho.in',
         'zoho.com.cn',
-        
+
         // GMX
         'gmx.com',
         'gmx.de',
         'gmx.fr',
         'gmx.co.uk',
         'gmx.net',
-        
+
         // Mail.com
         'mail.com',
         'email.com',
         'usa.com',
         'myself.com',
         'consultant.com',
-        
+
         // FastMail
         'fastmail.com',
         'fastmail.fm',
-        
+
         // Tutanota
         'tutanota.com',
         'tutanota.de',
         'tutamail.com',
-        
+
         // European providers
         'web.de',
         't-online.de',
@@ -531,7 +558,7 @@ return [
         'posteo.de',
         'posteo.net',
         'mailbox.org',
-        
+
         // Latin America providers
         'terra.com',
         'terra.com.br',
@@ -540,7 +567,7 @@ return [
         'terra.com.mx',
         'uol.com.br',
         'bol.com.br',
-        
+
         // Asian providers
         'qq.com',
         '163.com',
@@ -553,11 +580,11 @@ return [
         'sohu.com',
         'naver.com',
         'daum.net',
-        
+
         // Russian/CIS providers
         'rambler.ru',
         'mail.ua',
-        
+
         // Other providers
         'comcast.net',
         'rediffmail.com',

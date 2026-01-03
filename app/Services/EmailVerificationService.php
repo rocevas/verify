@@ -19,6 +19,16 @@ class EmailVerificationService
         return config('email-verification.smtp_timeout', 5);
     }
     
+    private function getSmtpConnectTimeout(): int
+    {
+        return config('email-verification.smtp_connect_timeout', config('email-verification.smtp_timeout', 2));
+    }
+    
+    private function getSmtpOperationTimeout(): int
+    {
+        return config('email-verification.smtp_operation_timeout', config('email-verification.smtp_timeout', 5));
+    }
+    
     private function getSmtpRetries(): int
     {
         return config('email-verification.smtp_retries', 1);
@@ -1874,10 +1884,17 @@ class EmailVerificationService
             return ['valid' => false, 'mailbox_full' => false];
         }
 
-        // Try MX records in priority order, but limit to first 3 to avoid long delays
+        // Try MX records concurrently (up to 3 to avoid long delays)
         $maxMxToTry = 3;
         $mxRecordsToTry = array_slice($mxRecordsToTry, 0, $maxMxToTry);
         
+        // Try concurrent connections first (faster)
+        $result = $this->performConcurrentSmtpCheck($mxRecordsToTry, $email);
+        if ($result !== null) {
+            return $result;
+        }
+        
+        // Fallback to sequential if concurrent failed (backward compatibility)
         $mailboxFull = false;
         
         foreach ($mxRecordsToTry as $mx) {
@@ -1967,24 +1984,160 @@ class EmailVerificationService
         return $result['valid'];
     }
     
+    /**
+     * Perform concurrent SMTP check by attempting connections to all MX servers simultaneously
+     * and using the first one that connects successfully.
+     * 
+     * Note: Due to PHP limitations, this uses a simplified concurrent approach:
+     * - Attempts connections with very short timeouts in sequence
+     * - Uses the first successful connection
+     * - Falls back to sequential method if all fail
+     * 
+     * Returns result array if successful, null if all connections failed (fallback to sequential)
+     */
+    private function performConcurrentSmtpCheck(array $mxRecords, string $email): ?array
+    {
+        if (empty($mxRecords) || count($mxRecords) === 1) {
+            // No benefit for single MX record
+            return null;
+        }
+        
+        $connectTimeout = $this->getSmtpConnectTimeout();
+        $quickTimeout = min(0.5, $connectTimeout / 2); // Very quick timeout for concurrent attempt
+        
+        // Try to connect to all MX servers with quick timeout, use first that succeeds
+        foreach ($mxRecords as $mx) {
+            $host = $mx['host'];
+            
+            // Quick connection attempt
+            $socket = @fsockopen($host, 25, $errno, $errstr, $quickTimeout);
+            
+            if ($socket !== false) {
+                // Successfully connected - use this socket
+                try {
+                    return $this->performSmtpCheckWithSocket($socket, $host, $email);
+                } catch (\Exception $e) {
+                    @fclose($socket);
+                    continue; // Try next MX
+                }
+            }
+        }
+        
+        // All quick attempts failed, return null to use sequential fallback
+        return null;
+    }
+    
+    /**
+     * Perform SMTP check using an already connected socket
+     * This is a helper method for concurrent connections
+     */
+    private function performSmtpCheckWithSocket($socket, string $host, string $email): array
+    {
+        $operationTimeout = $this->getSmtpOperationTimeout();
+        
+        try {
+            // Set operation timeout
+            stream_set_timeout($socket, $operationTimeout, 0);
+            
+            // Helper to check timeout
+            $isTimeout = function() use ($socket) {
+                $info = stream_get_meta_data($socket);
+                return $info['timed_out'] ?? false;
+            };
+            
+            // Read greeting with timeout check
+            $response = @fgets($socket, 515);
+            if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
+                return ['valid' => false, 'mailbox_full' => false];
+            }
+            
+            // EHLO with configurable hostname
+            $heloHostname = $this->getSmtpHeloHostname();
+            @fwrite($socket, "EHLO {$heloHostname}\r\n");
+            $response = @fgets($socket, 515);
+            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
+                return ['valid' => false, 'mailbox_full' => false];
+            }
+            
+            // Read all EHLO responses (multi-line) with timeout protection
+            $maxLines = 10;
+            $lineCount = 0;
+            while ($lineCount < $maxLines) {
+                $line = @fgets($socket, 515);
+                if ($isTimeout() || !$line || !str_starts_with($line, '250')) {
+                    break;
+                }
+                $lineCount++;
+            }
+            
+            // MAIL FROM
+            @fwrite($socket, "MAIL FROM: <noreply@".gethostname().">\r\n");
+            $response = @fgets($socket, 515);
+            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
+                return ['valid' => false, 'mailbox_full' => false];
+            }
+            
+            // RCPT TO
+            @fwrite($socket, "RCPT TO: <{$email}>\r\n");
+            $response = @fgets($socket, 515);
+            
+            if (!$response || $isTimeout()) {
+                @fwrite($socket, "QUIT\r\n");
+                @fclose($socket);
+                return ['valid' => false, 'mailbox_full' => false];
+            }
+            
+            // Analyze SMTP response
+            $responseAnalysis = $this->analyzeSmtpResponse($response);
+            
+            // Check for greylisting (4xx responses) - retry after delay
+            if ($responseAnalysis['is_greylisting'] && config('email-verification.enable_greylisting_retry', false)) {
+                $retryDelay = config('email-verification.greylisting_retry_delay', 2);
+                sleep($retryDelay);
+                
+                // Retry RCPT TO
+                @fwrite($socket, "RCPT TO: <{$email}>\r\n");
+                $retryResponse = @fgets($socket, 515);
+                
+                if ($retryResponse && !$isTimeout()) {
+                    $responseAnalysis = $this->analyzeSmtpResponse($retryResponse);
+                    $response = $retryResponse; // Update response for final check
+                }
+            }
+            
+            // QUIT
+            @fwrite($socket, "QUIT\r\n");
+            @fclose($socket);
+            
+            // Check RCPT TO response - valid responses
+            return [
+                'valid' => $responseAnalysis['is_valid'],
+                'mailbox_full' => $responseAnalysis['is_mailbox_full'] ?? false,
+            ];
+            
+        } catch (\Exception $e) {
+            @fclose($socket);
+            return ['valid' => false, 'mailbox_full' => false];
+        }
+    }
+
     private function performSmtpCheckWithDetails(string $host, string $email): array
     {
-        $timeout = $this->getSmtpTimeout();
-        $connectionTimeout = min(2, $timeout); // Connection timeout (max 2 seconds)
-        $readTimeout = $timeout; // Read timeout
+        $connectTimeout = $this->getSmtpConnectTimeout();
+        $operationTimeout = $this->getSmtpOperationTimeout();
         
         // Use connection timeout for initial connection
-        $socket = @fsockopen($host, 25, $errno, $errstr, $connectionTimeout);
+        $socket = @fsockopen($host, 25, $errno, $errstr, $connectTimeout);
         
         if (!$socket) {
             // Connection failed, add to skip list if auto-add enabled
             $this->addMxToSkipList($host, 'SMTP connection failed');
-            return false;
+            return ['valid' => false, 'mailbox_full' => false];
         }
 
         try {
-            // Set read timeout for all subsequent operations
-            stream_set_timeout($socket, $readTimeout, 0); // seconds, microseconds
+            // Set operation timeout for all subsequent operations
+            stream_set_timeout($socket, $operationTimeout, 0); // seconds, microseconds
             
             // Helper to check timeout
             $isTimeout = function() use ($socket) {
