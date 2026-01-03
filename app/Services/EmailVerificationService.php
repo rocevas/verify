@@ -956,7 +956,7 @@ class EmailVerificationService
                 // Save even invalid emails for tracking
                 $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, ['account' => null, 'domain' => null], $bulkJobId, $source);
-                return $result;
+                return $this->formatResponse($result);
             }
 
             $result['account'] = $parts['account'];
@@ -998,7 +998,7 @@ class EmailVerificationService
                 $result['state'] = $stateAndResult['state'];
                 $result['result'] = $stateAndResult['result'];
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $result;
+                return $this->formatResponse($result);
             }
 
             // 2. Blacklist check
@@ -1015,7 +1015,7 @@ class EmailVerificationService
                 $this->addDuration($result, $startTime);
                 $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $result;
+                return $this->formatResponse($result);
             }
             $result['blacklist'] = false;
             $result['checks']['blacklist'] = false; // Update checks array
@@ -1030,7 +1030,7 @@ class EmailVerificationService
                 $result['score'] = 0;
                 $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $result;
+                return $this->formatResponse($result);
             }
 
             // 2.6. Typo domain check (spam trap domains)
@@ -1092,7 +1092,7 @@ class EmailVerificationService
                 $result['score'] = 0;
                 $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $result;
+                return $this->formatResponse($result);
             }
 
             // 3.5. Unsupported domain check
@@ -1102,7 +1102,7 @@ class EmailVerificationService
                 $result['error'] = 'Domain does not support SMTP verification';
                 $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $result;
+                return $this->formatResponse($result);
             }
 
             // 3. Role-based email check
@@ -1122,7 +1122,7 @@ class EmailVerificationService
                 $result['domain_validity'] = false;
                 $this->addDuration($result, $startTime);
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $result;
+                return $this->formatResponse($result);
             }
             $result['domain_validity'] = true;
             $result['checks']['domain_validity'] = true; // Update checks array
@@ -1141,7 +1141,7 @@ class EmailVerificationService
                 $result['state'] = $stateAndResult['state'];
                 $result['result'] = $stateAndResult['result'];
                 $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $result;
+                return $this->formatResponse($result);
             }
 
             // 4.5. Public provider check (before SMTP check)
@@ -1285,7 +1285,65 @@ class EmailVerificationService
         // Record metrics
         $this->recordMetrics($result, $startTime);
         
-        return $result;
+        // Format response before returning
+        return $this->formatResponse($result);
+    }
+
+    /**
+     * Format verification response to ensure consistent structure
+     * Checks are flattened into main response, not in separate object
+     * 
+     * @param array $result
+     * @return array
+     */
+    private function formatResponse(array $result): array
+    {
+        $checks = $result['checks'] ?? [];
+        
+        // Flatten checks into main response
+        $formatted = [
+            'email' => $result['email'] ?? '',
+            'state' => $result['state'] ?? 'unknown',
+            'result' => $result['result'] ?? null,
+            'account' => $result['account'] ?? null,
+            'domain' => $result['domain'] ?? null,
+            'score' => $result['score'] ?? 0,
+            'email_score' => $result['score'] ?? 0, // Alias for backward compatibility
+            'duration' => $result['duration'] ?? null,
+            
+            // Checks flattened into main response
+            // Note: blacklist, isp_esp, government_tld are used in verification process
+            // but not returned in response as they are internal checks
+            'syntax' => $checks['syntax'] ?? false,
+            'domain_validity' => $checks['domain_validity'] ?? false,
+            'mx_record' => $checks['mx_record'] ?? false,
+            'smtp' => $checks['smtp'] ?? false,
+            'disposable' => $checks['disposable'] ?? false,
+            'role' => $checks['role'] ?? false,
+            'no_reply' => $checks['no_reply'] ?? false,
+            'typo_domain' => $checks['typo_domain'] ?? false,
+            
+            // Alias and typo suggestions
+            'alias' => $result['aliasOf'] ?? $result['alias_of'] ?? null,
+            'did_you_mean' => $result['did_you_mean'] ?? $result['typoSuggestion'] ?? $result['typo_suggestion'] ?? null,
+            'free' => $result['free'] ?? $result['is_free'] ?? false,
+            'mailbox_full' => $result['mailbox_full'] ?? false,
+        ];
+
+        // Only include error if present
+        if (!empty($result['error'])) {
+            $formatted['error'] = $result['error'];
+        }
+
+        // Add optional AI fields if present
+        if (isset($result['ai_confidence'])) {
+            $formatted['ai_confidence'] = $result['ai_confidence'];
+        }
+        if (isset($result['ai_insights'])) {
+            $formatted['ai_insights'] = $result['ai_insights'];
+        }
+
+        return $formatted;
     }
 
     /**

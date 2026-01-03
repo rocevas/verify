@@ -191,7 +191,7 @@ class EmailVerificationController extends Controller
 
         return response()->json([
             'email' => $email,
-            'typoSuggestion' => $suggestion,
+            'did_you_mean' => $suggestion,
             'hasSuggestion' => $suggestion !== null,
         ]);
     }

@@ -106,6 +106,9 @@ class EmailVerificationController extends Controller
             ->paginate($perPage, ['*'], 'page', $page);
 
         $data = $verifications->map(function ($verification) {
+            $checks = $this->buildChecksArray($verification);
+            
+            // Flatten checks into main response
             return [
                 'id' => $verification->uuid,
                 'email' => $verification->email,
@@ -114,9 +117,22 @@ class EmailVerificationController extends Controller
                 'email_score' => $verification->email_score, // Traditional email verification score (MX, blacklist, SMTP, etc.)
                 'ai_confidence' => $verification->ai_confidence, // AI score
                 'score' => $verification->score, // Final score (email_score + ai_confidence if AI is used, otherwise email_score)
-                'checks' => $this->buildChecksArray($verification),
-                'aliasOf' => $verification->alias_of,
-                'typoSuggestion' => $verification->did_you_mean,
+                
+                // Checks flattened into main response
+                // Note: blacklist, isp_esp, government_tld are internal checks, not returned
+                'syntax' => $checks['syntax'] ?? false,
+                'domain_validity' => $checks['domain_validity'] ?? false,
+                'mx_record' => $checks['mx_record'] ?? false,
+                'smtp' => $checks['smtp'] ?? false,
+                'disposable' => $checks['disposable'] ?? false,
+                'role' => $checks['role'] ?? false,
+                'no_reply' => $checks['no_reply'] ?? false,
+                'typo_domain' => $checks['typo_domain'] ?? false,
+                
+                'alias' => $verification->alias_of,
+                'did_you_mean' => $verification->did_you_mean,
+                'free' => $verification->is_free ?? false,
+                'mailbox_full' => $verification->mailbox_full ?? false,
                 'source' => $verification->source,
                 'created_at' => $verification->created_at?->toIso8601String(),
             ];
