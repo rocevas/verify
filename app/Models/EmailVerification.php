@@ -55,7 +55,8 @@ class EmailVerification extends Model
         'account',
         'domain',
         'state', // enum: deliverable, undeliverable, risky, unknown, error
-        'result', // string: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error
+        'result', // string: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error (kept for backward compatibility)
+        'reason', // string: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error (matches Emailable API format)
         'score', // Final score (email_score + ai_confidence if AI is used, otherwise email_score)
         'email_score', // Traditional email verification score (MX, blacklist, SMTP checks, etc.)
         'ai_analysis',
@@ -78,6 +79,13 @@ class EmailVerification extends Model
         'gravatar',
         'did_you_mean',
         'alias_of',
+        'numerical_characters',
+        'alphabetical_characters',
+        'unicode_symbols',
+        'mx_record_string',
+        'smtp_provider',
+        'implicit_mx_record',
+        'secure_email_gateway',
         'verified_at',
         'duration', // Verification duration in seconds (rounded to 2 decimal places)
     ];
@@ -98,6 +106,8 @@ class EmailVerification extends Model
         'isp_esp' => 'boolean',
         'government_tld' => 'boolean',
         'gravatar' => 'boolean',
+        'implicit_mx_record' => 'boolean',
+        'secure_email_gateway' => 'boolean',
         'ai_risk_factors' => 'array',
         'verified_at' => 'datetime',
     ];

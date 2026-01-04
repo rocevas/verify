@@ -148,19 +148,104 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Score Calculation Weights
+    | Score Calculation Multipliers (Multiplicative System)
     |--------------------------------------------------------------------------
     |
-    | Points assigned to each verification check. Total score is calculated
-    | by summing up points for passed checks and applying penalties.
+    | Multiplicative scoring system matching Emailable:
+    | - Base score: 100
+    | - Each factor multiplies the score (e.g., 0.95x = 95%)
+    | - Final score = 100 * factor1 * factor2 * factor3...
+    | - Risky emails: score 1-80, Good emails: score 80-100
     |
-    | - syntax: Points for valid email syntax
-    | - mx: Points for valid MX records
-    | - smtp: Points for successful SMTP check
-    | - disposable: Points for non-disposable email (or penalty if disposable)
-    | - role_penalty: Penalty points for role-based emails (subtracted from score)
+    | Multipliers are applied in order, so order matters.
     |
-    | Final score is clamped between 0 and 100.
+    */
+
+    'score_multipliers' => [
+        // Base score for calculation (starting point)
+        'base_score' => 100.0, // Base score before multipliers
+        
+        // Free email provider multiplier
+        'free' => 0.95, // 95% - Free emails get 5% penalty
+        
+        // Disposable email multiplier (very severe)
+        'disposable' => 0.05, // 5% - Disposable emails get 95% penalty (score ~5)
+        
+        // Typo domain multiplier (very severe, similar to disposable)
+        'typo_domain' => 0.05, // 5% - Typo domains get 95% penalty
+        
+        // Role-based email multiplier (oranžinis minusinis)
+        'role' => 0.7, // 70% - Role-based emails get 30% penalty
+        
+        // Catch-all / Accept-All multiplier (oranžinis minusinis)
+        'catch_all' => 0.6, // 60% - Catch-all servers get 40% penalty
+        
+        // Mailbox full multiplier (oranžinis/raudonas minusinis)
+        'mailbox_full' => 0.5, // 50% - Mailbox full gets 50% penalty
+        
+        // Tag/Alias multiplier
+        'alias' => 0.95, // 95% - Tags/aliases get 5% penalty
+        
+        // Numerical characters penalty per character
+        'numerical_char_per_penalty' => 0.02, // -2% per numerical character (1 char = 0.98x, 3 chars = 0.94x)
+        'numerical_char_min_multiplier' => 0.85, // Minimum multiplier for numerical characters
+        
+        // Alphabetical characters penalty (for low counts)
+        'alphabetical_char_per_penalty' => 0.005, // -0.5% per char under threshold
+        'alphabetical_char_min_multiplier' => 0.95, // Minimum multiplier for alphabetical characters
+        
+        // Other/Unknown factors multiplier (oranžinis minusinis)
+        'other' => 0.8, // 80% - Other issues get 20% penalty
+        
+        // Free domain multiplier (yahoo.com, hotmail.com, etc.)
+        'free_domain' => 0.9, // 90% - Specific free domains get 10% penalty
+        
+        // Implicit MX score (when domain has A record but no MX records)
+        'implicit_mx_score' => 10, // Very low score for implicit MX only (10 out of 100)
+        
+        // Score bounds
+        'min_score' => 0, // Minimum score
+        'max_score' => 100, // Maximum score
+        
+        // Secure Email Gateway handling
+        // When SMTP check fails due to secure gateway (e.g., Cloudflare) but domain is valid
+        'secure_gateway_score_override' => 100, // Override score to 100 if secure gateway blocks SMTP
+        
+        // Secure Email Gateway providers that block SMTP checks
+        'secure_gateway_providers' => [
+            'Cloudflare',
+            // Add more providers that block SMTP checks
+        ],
+        
+        // Domain-specific multipliers
+        'domains' => [
+            'yahoo.com' => 0.9,
+            'hotmail.com' => 0.9,
+            'outlook.com' => 0.9,
+            'aol.com' => 0.9,
+            // Add more domain-specific multipliers as needed
+        ],
+        
+        // Legacy weights for backward compatibility (if needed)
+        'legacy_weights' => [
+            'syntax' => 20,
+            'domain_validity' => 20,
+            'mx_record' => 25,
+            'smtp' => 20,
+            'gravatar_bonus' => 5,
+            'dmarc_reject_bonus' => 10,
+            'dmarc_quarantine_bonus' => 5,
+            'government_tld_penalty' => 10,
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Score Calculation Weights (Legacy - Deprecated)
+    |--------------------------------------------------------------------------
+    |
+    | Legacy additive scoring system. Now using multiplicative system above.
+    | Kept for backward compatibility.
     |
     */
 

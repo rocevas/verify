@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\EmailVerification;
 use App\Services\EmailVerification\DomainValidationService;
+use App\Services\EmailVerification\EmailAttributeService;
 use App\Services\EmailVerification\EmailParserService;
 use App\Services\EmailVerification\GravatarService;
 use App\Services\EmailVerification\RiskAssessmentService;
@@ -21,6 +22,7 @@ class EmailVerificationService
         private SmtpVerificationService $smtpVerificationService,
         private ScoreCalculationService $scoreCalculationService,
         private VerificationResultService $verificationResultService,
+        private EmailAttributeService $emailAttributeService,
         private MetricsService $metricsService
     ) {
     }
@@ -71,6 +73,11 @@ class EmailVerificationService
                 $result['score'] = 0;
                 // Save even invalid emails for tracking
                 $this->verificationResultService->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, ['account' => null, 'domain' => null], $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -78,11 +85,16 @@ class EmailVerificationService
             $result['account'] = $parts['account'];
             $result['domain'] = $parts['domain'];
 
+            // 0.4. Email attributes analysis (Emailable format: numerical, alphabetical, unicode characters)
+            $emailAttributes = $this->emailAttributeService->analyzeEmailAttributes($email);
+            $result['numerical_characters'] = $emailAttributes['numerical_characters'];
+            $result['alphabetical_characters'] = $emailAttributes['alphabetical_characters'];
+            $result['unicode_symbols'] = $emailAttributes['unicode_symbols'];
+
             // 0.5. Email alias detection (before other checks)
             $aliasOf = $this->emailParserService->detectAlias($email);
             if ($aliasOf && $aliasOf !== $email) {
                 $result['alias_of'] = $aliasOf;
-                $result['aliasOf'] = $aliasOf; // Keep for backward compatibility
             }
 
             // 0.6. Typo suggestions (check for typos even if syntax is valid)
@@ -115,6 +127,7 @@ class EmailVerificationService
                 $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                 $result['state'] = $stateAndResult['state'];
                 $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -132,6 +145,11 @@ class EmailVerificationService
                 $result['checks']['blacklist'] = true; // Update checks array
                 $this->verificationResultService->addDuration($result, $startTime);
                 $this->verificationResultService->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -147,16 +165,25 @@ class EmailVerificationService
                 $result['status'] = $riskChecks['no_reply_status'] ?? 'do_not_mail';
                 $result['score'] = 0;
                 $this->verificationResultService->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
 
             // 2.6. Typo domain check (spam trap domains)
+            // Emailable behavior:
+            // - If typo domain doesn't exist: invalid_domain (0 score) - return early
+            // - If typo domain exists: low_deliverability (4-5 score) - continue processing
             $riskChecks = $this->riskAssessmentService->getRiskChecks();
             if ($riskChecks['enable_typo_check'] ?? true) {
                 $typoCheck = $this->riskAssessmentService->checkTypoDomain($parts['domain']);
                 $result['typo_domain'] = $typoCheck;
                 $result['checks']['typo_domain'] = $typoCheck; // Update checks array
+
                 if ($typoCheck) {
                     // Get the corrected domain
                     $correctedDomain = $this->riskAssessmentService->getTypoCorrection($parts['domain']);
@@ -165,12 +192,25 @@ class EmailVerificationService
                         $result['did_you_mean'] = $parts['account'] . '@' . $correctedDomain;
                     }
 
-                    $result['status'] = $riskChecks['typo_domain_status'] ?? 'spamtrap';
-                    $result['score'] = 0;
-                    $result['error'] = 'Typo domain detected (likely spam trap)';
-                    $this->verificationResultService->addDuration($result, $startTime);
-                    $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                    return $result;
+                    // Check if domain is valid (exists) - if not, return early with 0 score
+                    // Domain validity check happens later, so we'll check it here first
+                    $domainValidity = $this->domainValidationService->checkDomainValidity($parts['domain']);
+                    if (!$domainValidity['valid']) {
+                        // Typo domain that doesn't exist = invalid_domain (0 score)
+                        $result['status'] = $riskChecks['typo_domain_status'] ?? 'spamtrap';
+                        $result['score'] = 0;
+                        $result['error'] = 'Typo domain detected (domain does not exist)';
+                        $result['domain_validity'] = false;
+                        $this->verificationResultService->addDuration($result, $startTime);
+                        // Determine state and result before saving
+                        $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                        $result['state'] = $stateAndResult['state'];
+                        $result['result'] = $stateAndResult['result'];
+                        $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
+                        $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                        return $this->verificationResultService->formatResponse($result);
+                    }
+                    // If typo domain exists, continue processing (will get low_deliverability with 4-5 score)
                 }
             }
 
@@ -183,8 +223,13 @@ class EmailVerificationService
                     $result['score'] = 0;
                     $result['error'] = 'ISP/ESP infrastructure domain (not for marketing)';
                     $this->verificationResultService->addDuration($result, $startTime);
+                    // Determine state and result before saving
+                    $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                    $result['state'] = $stateAndResult['state'];
+                    $result['result'] = $stateAndResult['result'];
+                    $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                     $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                    return $result;
+                    return $this->verificationResultService->formatResponse($result);
                 }
             }
 
@@ -199,6 +244,9 @@ class EmailVerificationService
             }
 
             // 3. Disposable email check
+            // Emailable behavior:
+            // - If disposable domain doesn't exist: invalid_domain (0 score) - return early
+            // - If disposable domain exists: low_deliverability (5 score) - continue processing
             $disposableCheck = $this->emailParserService->checkDisposable($parts['domain']);
             $result['disposable'] = $disposableCheck;
             $result['checks']['disposable'] = $disposableCheck; // Update checks array
@@ -209,11 +257,24 @@ class EmailVerificationService
                 $result['checks']['free'] = $result['free']; // Add to checks for score calculation
                 $result['checks']['is_free'] = $result['is_free']; // Also add is_free for compatibility
 
-                $result['status'] = 'do_not_mail';
-                $result['score'] = 0;
-                $this->verificationResultService->addDuration($result, $startTime);
-                $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $this->verificationResultService->formatResponse($result);
+                // Check if domain is valid (exists) - if not, return early with 0 score
+                // Domain validity check happens later, so we'll check it here first
+                $domainValidity = $this->domainValidationService->checkDomainValidity($parts['domain']);
+                if (!$domainValidity['valid']) {
+                    // Disposable domain that doesn't exist = invalid_domain (0 score)
+                    $result['status'] = 'do_not_mail';
+                    $result['score'] = 0;
+                    $result['domain_validity'] = false;
+                    $this->verificationResultService->addDuration($result, $startTime);
+                    // Determine state and result before saving
+                    $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                    $result['state'] = $stateAndResult['state'];
+                    $result['result'] = $stateAndResult['result'];
+                    $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
+                    $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                    return $this->verificationResultService->formatResponse($result);
+                }
+                // If disposable domain exists, continue processing (will get low_deliverability with 5 score)
             }
 
             // 3.5. Unsupported domain check
@@ -222,6 +283,11 @@ class EmailVerificationService
                 $result['score'] = 0;
                 $result['error'] = 'Domain does not support SMTP verification';
                 $this->verificationResultService->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -242,6 +308,11 @@ class EmailVerificationService
                 $result['score'] = 0;
                 $result['domain_validity'] = false;
                 $this->verificationResultService->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -250,8 +321,22 @@ class EmailVerificationService
 
             // 4. MX check
             $mxCheck = $this->domainValidationService->checkMx($parts['domain']);
+            $mxRecords = $this->domainValidationService->getMxRecords($parts['domain']);
             $result['mx_record'] = $mxCheck;
             $result['checks']['mx_record'] = $mxCheck; // Update checks array
+
+            // 4.1. MX Record string (Emailable format - first MX record)
+            $result['mx_record_string'] = !empty($mxRecords) ? $mxRecords[0]['host'] : null;
+
+            // 4.2. Implicit MX check
+            $result['implicit_mx_record'] = $this->emailAttributeService->checkImplicitMx($parts['domain']);
+
+            // 4.3. Secure Email Gateway check
+            $result['secure_email_gateway'] = $this->emailAttributeService->checkSecureEmailGateway($mxRecords);
+
+            // 4.4. SMTP Provider detection (Emailable format - initial detection from MX)
+            $result['smtp_provider'] = $this->emailAttributeService->detectSmtpProvider($mxRecords);
+
             if (!$mxCheck) {
                 $result['status'] = 'invalid';
                 $result['error'] = $this->verificationResultService->getErrorMessages()['no_mx_records'];
@@ -263,18 +348,23 @@ class EmailVerificationService
                     'email' => $email,
                     'domain' => $parts['domain'],
                     'mx_records' => [],
+                    'numerical_characters' => $result['numerical_characters'] ?? 0,
+                    'alphabetical_characters' => $result['alphabetical_characters'] ?? 0,
+                    'alias_of' => $result['alias_of'] ?? null,
+                    'implicit_mx_record' => $result['implicit_mx_record'] ?? false, // Pass implicit MX info
                 ]);
                 $this->verificationResultService->addDuration($result, $startTime);
                 // Determine state and result before saving
                 $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                 $result['state'] = $stateAndResult['state'];
                 $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
 
             // 4.5. Public provider check (before SMTP check)
-            $mxRecords = $this->domainValidationService->getMxRecords($parts['domain']);
+            // Note: mxRecords already fetched above at line 305
             $publicProvider = $this->domainValidationService->isPublicProvider($parts['domain'], $mxRecords);
 
             // Set free flag if domain is a public provider (free email provider)
@@ -286,26 +376,28 @@ class EmailVerificationService
             if ($publicProvider && ($publicProvider['skip_smtp'] ?? false)) {
                 // Skip SMTP check for public providers
                 // Public providers (Gmail, Yahoo, etc.) are catch-all servers
+                // Emailable: Free providers with catch-all are treated as accepted_email (deliverable) with score 85-93
                 if ($result['mx_record']) {
-                    // Public providers are catch-all, so mark as catch_all status (not valid)
-                    // This matches the behavior for other catch-all servers
-                    $result['status'] = config('email-verification.catch_all_status', 'catch_all'); // Public providers are catch-all servers
+                    // Public providers are catch-all, but for free providers this is acceptable
+                    // Emailable treats these as accepted_email (deliverable) with score 85-93
+                    $result['status'] = 'valid'; // Valid status for free catch-all providers
                     $result['catch_all'] = true; // Set catch-all flag
                     $result['smtp'] = false; // Not checked (public providers block SMTP checks)
                     $result['checks']['smtp'] = false; // Update checks array
                     $result['mailbox_full'] = false; // Not checked (public providers are assumed to have space)
                     $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
 
-                    // Calculate score with new system (without SMTP check)
-                    // Public providers are catch-all, so they get base score without bonus
-                    // Base score: syntax (20) + domain_validity (20) + mx_record (20) + disposable (10) + role_bonus (10) = 80
-                    // Note: No bonus for catch-all servers since we can't verify if email actually exists
+                    // Calculate score with multiplicative system
+                    // Free providers with catch-all: 100 * 0.95 (free) * 0.98-1.0 (numbers) = 85-95
+                    // But Emailable shows 85-93, so catch-all penalty should not apply for free providers
                     $result['score'] = $this->scoreCalculationService->calculateScore($result['checks'], [
                         'email' => $email,
                         'domain' => $parts['domain'],
                         'mx_records' => $mxRecords,
+                        'numerical_characters' => $result['numerical_characters'] ?? 0,
+                        'alphabetical_characters' => $result['alphabetical_characters'] ?? 0,
+                        'alias_of' => $result['alias_of'] ?? null,
                     ]);
-                    // Catch-all servers don't get bonus - they're risky, not trusted
 
                     // Check Gravatar for catch-all emails (helps determine if email likely exists)
                     if (config('email-verification.enable_gravatar_check', true)) {
@@ -315,9 +407,12 @@ class EmailVerificationService
 
                             if ($gravatar['has_gravatar'] ?? false) {
                                 // Email has Gravatar - more likely to exist (active user)
-                                $weights = $this->scoreCalculationService->getScoreWeights();
+                                $multipliers = $this->scoreCalculationService->getScoreMultipliers();
+                                $weights = $multipliers['legacy_weights'] ?? [];
                                 $gravatarBonus = $weights['gravatar_bonus'] ?? 5;
-                                $result['score'] = min(100, max(0, $result['score'] + $gravatarBonus)); // Clamp to 0-100
+                                $minScore = $multipliers['min_score'] ?? 0;
+                                $maxScore = $multipliers['max_score'] ?? 100;
+                                $result['score'] = min($maxScore, max($minScore, $result['score'] + $gravatarBonus));
                                 $result['gravatar'] = true;
                                 $result['gravatar_url'] = $gravatar['gravatar_url'] ?? null;
                             } else {
@@ -353,7 +448,8 @@ class EmailVerificationService
                                 ];
 
                                 // Add confidence boost based on DMARC policy
-                                $weights = $this->scoreCalculationService->getScoreWeights();
+                                $multipliers = $this->scoreCalculationService->getScoreMultipliers();
+                                $weights = $multipliers['legacy_weights'] ?? [];
                                 $dmarcBonus = 0;
 
                                 if ($dmarcPolicy === 'reject') {
@@ -380,7 +476,9 @@ class EmailVerificationService
                                 }
 
                                 if ($dmarcBonus > 0) {
-                                    $result['score'] = min(100, max(0, $result['score'] + $dmarcBonus)); // Clamp to 0-100
+                                    $minScore = $multipliers['min_score'] ?? 0;
+                                    $maxScore = $multipliers['max_score'] ?? 100;
+                                    $result['score'] = min($maxScore, max($minScore, $result['score'] + $dmarcBonus));
                                     $result['dmarc_confidence_boost'] = $dmarcBonus;
                                 }
                             } else {
@@ -415,6 +513,7 @@ class EmailVerificationService
                     $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                     $result['state'] = $stateAndResult['state'];
                     $result['result'] = $stateAndResult['result'];
+                    $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                     $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                     return $this->verificationResultService->formatResponse($result);
                 }
@@ -425,6 +524,9 @@ class EmailVerificationService
                 'email' => $email,
                 'domain' => $parts['domain'],
                 'mx_records' => $mxRecords,
+                'numerical_characters' => $result['numerical_characters'] ?? 0,
+                'alphabetical_characters' => $result['alphabetical_characters'] ?? 0,
+                'alias_of' => $result['alias_of'] ?? null,
             ]);
 
             // 5. SMTP check (AfterShip method: catch-all check first, then specific email if not catch-all)
@@ -442,6 +544,19 @@ class EmailVerificationService
                         $result['mailbox_full'] = $smtpResult['mailbox_full'] ?? false;
                         $result['checks']['mailbox_full'] = $result['mailbox_full']; // Add to checks for score calculation
                         $result['catch_all'] = $isCatchAll; // Store catch-all status
+                        
+                        // Store error message if SMTP check failed (for unavailable/timeout/no_connect detection)
+                        // Note: Don't set error if SMTP failed due to mailbox rejection (550)
+                        // That should be detected as rejected_email, not unavailable_smtp
+                        if (!$smtpCheck) {
+                            // Only set error if it's a connection/timeout issue, not mailbox rejection
+                            // If error is set in smtpResult, it's likely connection/timeout issue
+                            if (isset($smtpResult['error'])) {
+                                $result['error'] = $smtpResult['error'];
+                            }
+                            // If no error, SMTP check might have failed due to mailbox rejection (550)
+                            // Don't set error - let determineStateAndResult detect it as rejected_email
+                        }
 
                         // Store VRFY/EXPN verification method and confidence if available
                         if (isset($smtpResult['verification_method'])) {
@@ -449,6 +564,11 @@ class EmailVerificationService
                         }
                         if (isset($smtpResult['confidence'])) {
                             $result['smtp_confidence'] = $smtpResult['confidence'];
+                        }
+
+                        // Update SMTP Provider detection with actual SMTP host
+                        if (isset($smtpResult['smtp_host'])) {
+                            $result['smtp_provider'] = $this->emailAttributeService->detectSmtpProvider($mxRecords, $smtpResult['smtp_host']);
                         }
 
                         // If catch-all detected, handle it (AfterShip method)
@@ -558,11 +678,16 @@ class EmailVerificationService
                             }
 
                             // Recalculate score after Gravatar and DMARC checks (if applicable)
+                            // Catch-all servers get penalty: base 85 - catch_all_penalty 20 = 65
+                            // But with mailbox_full or other factors, can be lower (e.g., 60)
                             $result['score'] = $this->scoreCalculationService->calculateScore($result['checks'], [
                                 'email' => $email,
                                 'domain' => $parts['domain'],
                                 'mx_records' => $mxRecords,
                                 'verification_method' => $result['verification_method'] ?? null,
+                                'numerical_characters' => $result['numerical_characters'] ?? 0,
+                                'alphabetical_characters' => $result['alphabetical_characters'] ?? 0,
+                                'alias_of' => $result['alias_of'] ?? null,
                             ]);
 
                             $result['error'] = 'Catch-all server detected';
@@ -571,18 +696,74 @@ class EmailVerificationService
                             $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                             $result['state'] = $stateAndResult['state'];
                             $result['result'] = $stateAndResult['result'];
+                            $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                             $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                             return $this->verificationResultService->formatResponse($result);
                         }
 
                         // Not catch-all, so SMTP check result is valid
-                        // Recalculate score after SMTP check
-                        $result['score'] = $this->scoreCalculationService->calculateScore($result['checks'], [
-                            'email' => $email,
-                            'domain' => $parts['domain'],
-                            'mx_records' => $mxRecords,
-                            'verification_method' => $result['verification_method'] ?? null,
-                        ]);
+                        if ($smtpCheck) {
+                            // SMTP check passed - recalculate score with SMTP passed
+                            // Multiplicative system: base 100 with multipliers
+                            // Free providers: 100 * 0.95 (free) * 0.98-1.0 (numbers) = 85-95
+                            // Non-free: 100 * (multipliers) = 98-100
+                            $result['score'] = $this->scoreCalculationService->calculateScore($result['checks'], [
+                                'email' => $email,
+                                'domain' => $parts['domain'],
+                                'mx_records' => $mxRecords,
+                                'numerical_characters' => $result['numerical_characters'] ?? 0,
+                                'alphabetical_characters' => $result['alphabetical_characters'] ?? 0,
+                                'alias_of' => $result['alias_of'] ?? null,
+                            ]);
+                            $result['status'] = 'valid';
+                        } else {
+                            // SMTP check failed - could be rejected_email or unavailable_smtp
+                            // Check if it's due to secure email gateway (Cloudflare, etc.)
+                            // If secure email gateway detected and domain is valid, treat as accepted_email
+                            $hasSecureGateway = $result['secure_email_gateway'] ?? false;
+                            $smtpError = $result['error'] ?? null;
+                            $isUnavailableError = $smtpError && (
+                                str_contains(strtolower($smtpError), 'unavailable') ||
+                                str_contains(strtolower($smtpError), 'timeout') ||
+                                str_contains(strtolower($smtpError), 'connection')
+                            );
+                            
+                            // Check if SMTP provider is a secure gateway provider (known to block SMTP checks)
+                            $smtpProvider = $result['smtp_provider'] ?? null;
+                            $multipliers = $this->scoreCalculationService->getScoreMultipliers();
+                            $secureGatewayProviders = $multipliers['secure_gateway_providers'] ?? [];
+                            $isSecureGatewayProvider = $smtpProvider && in_array($smtpProvider, $secureGatewayProviders, true);
+                            
+                            // If secure gateway provider detected, treat SMTP failure as unavailable (gateway blocking)
+                            if ($isSecureGatewayProvider && !$smtpCheck) {
+                                $isUnavailableError = true;
+                            }
+                            
+                            if (($hasSecureGateway || $isSecureGatewayProvider) && $isUnavailableError && $result['mx_record'] && $result['domain_validity']) {
+                                // Secure email gateway blocking SMTP check, but domain is valid
+                                // Treat as accepted_email (override score) - can't verify via SMTP but domain exists
+                                $result['score'] = $this->scoreCalculationService->calculateScore($result['checks'], [
+                                    'email' => $email,
+                                    'domain' => $parts['domain'],
+                                    'mx_records' => $mxRecords,
+                                    'numerical_characters' => $result['numerical_characters'] ?? 0,
+                                    'alphabetical_characters' => $result['alphabetical_characters'] ?? 0,
+                                    'alias_of' => $result['alias_of'] ?? null,
+                                ]);
+                                // If score is less than override score, set to override (secure gateway means we can't verify, but domain is valid)
+                                $overrideScore = $multipliers['secure_gateway_score_override'] ?? 100;
+                                if ($result['score'] < $overrideScore) {
+                                    $result['score'] = $overrideScore;
+                                }
+                                $result['status'] = 'valid';
+                                $result['error'] = null; // Clear error - it's not really an error, just gateway blocking
+                            } else {
+                                // SMTP check failed = mailbox doesn't exist (REJECTED EMAIL = 0 score)
+                                // Emailable: rejected_email - The email address was rejected by the mail server
+                                $result['score'] = 0;
+                                $result['status'] = 'invalid';
+                            }
+                        }
                     } else {
                         // Rate limit exceeded, skip SMTP check
                         $result['smtp'] = false;
@@ -606,6 +787,8 @@ class EmailVerificationService
                     $result['mailbox_full'] = false; // Not checked
                     $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
                     $result['catch_all'] = false;
+                    // Set error message so it can be detected as unavailable/timeout/no_connect
+                    $result['error'] = $e->getMessage();
                 }
             } else {
                 $result['smtp'] = false; // Not checked
@@ -640,6 +823,7 @@ class EmailVerificationService
             $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
             $result['state'] = $stateAndResult['state'];
             $result['result'] = $stateAndResult['result'];
+            $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
 
             // Save to database
             $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
@@ -657,6 +841,7 @@ class EmailVerificationService
             $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
             $result['state'] = $stateAndResult['state'];
             $result['result'] = $stateAndResult['result'];
+            $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
 
             // Try to save even on error
             try {
