@@ -1276,6 +1276,18 @@ class EmailVerificationService
                         }
                     }
                     
+                    // Calculate Hunter.io style confidence score for catch-all emails
+                    // Hunter.io assigns confidence % based on publicly available data
+                    // Recommended filter: ~85-90% confidence for catch-all emails
+                    if (config('email-verification.enable_hunter_confidence', true)) {
+                        $hunterConfidence = $this->calculateHunterStyleConfidence($result['checks'], true, $result);
+                        $result['hunter_confidence'] = $hunterConfidence;
+                        Log::debug('Hunter.io style confidence calculated for public provider', [
+                            'email' => $email,
+                            'confidence' => $hunterConfidence,
+                        ]);
+                    }
+                    
                     $result['error'] = null; // Clear any errors
                     $this->addDuration($result, $startTime);
                     // Determine state and result before saving
@@ -1422,6 +1434,18 @@ class EmailVerificationService
                             
                             // Recalculate score after Gravatar and DMARC checks (if applicable)
                             $result['score'] = $this->calculateScore($result['checks']);
+                            
+                            // Calculate Hunter.io style confidence score for catch-all emails
+                            // Hunter.io assigns confidence % based on publicly available data
+                            // Recommended filter: ~85-90% confidence for catch-all emails
+                            if (config('email-verification.enable_hunter_confidence', true)) {
+                                $hunterConfidence = $this->calculateHunterStyleConfidence($result['checks'], true, $result);
+                                $result['hunter_confidence'] = $hunterConfidence;
+                                Log::debug('Hunter.io style confidence calculated', [
+                                    'email' => $email,
+                                    'confidence' => $hunterConfidence,
+                                ]);
+                            }
                             
                             $result['error'] = 'Catch-all server detected';
                             $this->addDuration($result, $startTime);
@@ -1596,6 +1620,16 @@ class EmailVerificationService
         }
         if (isset($result['smtp_confidence'])) {
             $formatted['smtp_confidence'] = $result['smtp_confidence'];
+        }
+        
+        // Add Hunter.io style confidence score if present
+        if (isset($result['hunter_confidence'])) {
+            $formatted['hunter_confidence'] = $result['hunter_confidence'];
+        }
+        
+        // Add checks array for compatibility (if needed by frontend)
+        if (isset($result['checks'])) {
+            $formatted['checks'] = $result['checks'];
         }
 
         // Only include error if present
@@ -3199,6 +3233,109 @@ class EmailVerificationService
 
         // Clamp score between 0 and 100
         return max(0, min(100, $score));
+    }
+    
+    /**
+     * Calculate Hunter.io style confidence score (0-100%)
+     * 
+     * Hunter.io assigns confidence % based on publicly available data.
+     * Recommended filter: ~85-90% confidence for catch-all emails.
+     * 
+     * Base confidence:
+     * - Syntax: +10%
+     * - Domain validity: +15%
+     * - MX record: +20%
+     * - SMTP: +30% (highest weight)
+     * 
+     * Catch-all specific:
+     * - Reduce confidence by 30% if catch-all
+     * - Add bonuses:
+     *   - Gravatar: +15%
+     *   - DMARC reject: +10%
+     *   - DMARC quarantine: +5%
+     *   - VRFY/EXPN: +10%
+     * 
+     * Penalties:
+     * - Disposable: 0%
+     * - Role: -20%
+     * - Typo: 0%
+     * - No-reply: 0%
+     * - Blacklist: 0%
+     * 
+     * @param array $checks Verification checks
+     * @param bool $isCatchAll Whether email is from catch-all server
+     * @param array $result Full verification result (for Gravatar, DMARC, etc.)
+     * @return int Confidence score (0-100)
+     */
+    private function calculateHunterStyleConfidence(array $checks, bool $isCatchAll, array $result = []): int
+    {
+        $confidence = 0;
+        
+        // Base confidence from checks
+        if ($checks['syntax'] ?? false) {
+            $confidence += 10;
+        }
+        
+        if ($checks['domain_validity'] ?? false) {
+            $confidence += 15;
+        }
+        
+        if ($checks['mx_record'] ?? false) {
+            $confidence += 20;
+        }
+        
+        if ($checks['smtp'] ?? false) {
+            $confidence += 30; // Highest weight - SMTP is most reliable
+        }
+        
+        // Catch-all specific adjustments
+        if ($isCatchAll) {
+            // Reduce confidence for catch-all (30% reduction)
+            $confidence = (int)($confidence * 0.7);
+            
+            // Add bonuses for catch-all emails
+            if (($result['gravatar'] ?? false)) {
+                $confidence += 15; // Gravatar indicates active user
+            }
+            
+            if (isset($result['dmarc']['policy'])) {
+                $dmarcPolicy = $result['dmarc']['policy'];
+                if ($dmarcPolicy === 'reject') {
+                    $confidence += 10; // DMARC reject = strict security
+                } elseif ($dmarcPolicy === 'quarantine') {
+                    $confidence += 5; // DMARC quarantine = moderate security
+                }
+            }
+            
+            // VRFY/EXPN verification method adds confidence
+            if (isset($result['verification_method'])) {
+                $confidence += 10; // VRFY/EXPN = definitive answer
+            }
+        }
+        
+        // Penalties
+        if ($checks['disposable'] ?? false) {
+            $confidence = 0; // Disposable emails = 0% confidence
+        }
+        
+        if ($checks['role'] ?? false) {
+            $confidence = max(0, $confidence - 20); // Role emails = -20%
+        }
+        
+        if ($checks['typo_domain'] ?? false) {
+            $confidence = 0; // Typo domains = 0% confidence
+        }
+        
+        if ($checks['no_reply'] ?? false) {
+            $confidence = 0; // No-reply emails = 0% confidence
+        }
+        
+        if ($checks['blacklist'] ?? false) {
+            $confidence = 0; // Blacklisted emails = 0% confidence
+        }
+        
+        // Clamp to 0-100
+        return min(100, max(0, $confidence));
     }
 
     /**

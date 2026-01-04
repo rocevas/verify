@@ -953,6 +953,39 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Hunter.io Style Confidence Score
+    |--------------------------------------------------------------------------
+    |
+    | Enable Hunter.io style confidence score (0-100%) for catch-all emails.
+    | Hunter.io assigns confidence % based on publicly available data.
+    |
+    | Recommended filter: ~85-90% confidence for catch-all emails.
+    |
+    | Base confidence:
+    | - Syntax: +10%
+    | - Domain validity: +15%
+    | - MX record: +20%
+    | - SMTP: +30% (highest weight)
+    |
+    | Catch-all specific:
+    | - Reduce confidence by 30% if catch-all
+    | - Add bonuses:
+    |   - Gravatar: +15%
+    |   - DMARC reject: +10%
+    |   - DMARC quarantine: +5%
+    |   - VRFY/EXPN: +10%
+    |
+    | Penalties:
+    | - Disposable: 0%
+    | - Role: -20%
+    | - Typo: 0%
+    |
+    */
+
+    'enable_hunter_confidence' => env('EMAIL_VERIFICATION_HUNTER_CONFIDENCE', true),
+
+    /*
+    |--------------------------------------------------------------------------
     | Domain Validity Check
     |--------------------------------------------------------------------------
     |

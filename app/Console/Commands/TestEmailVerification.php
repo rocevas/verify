@@ -69,7 +69,6 @@ class TestEmailVerification extends Command
             
             // Basic info
             $this->line("Email: " . ($result['email'] ?? $email));
-            $this->line("Status: " . ($result['status'] ?? 'unknown'));
             $this->line("State: " . ($result['state'] ?? 'unknown'));
             $this->line("Result: " . ($result['result'] ?? 'unknown'));
             $this->line("Score: " . ($result['score'] ?? 0));
@@ -120,6 +119,13 @@ class TestEmailVerification extends Command
                 if (isset($result['dmarc']['error'])) {
                     $this->line("  Error: " . $result['dmarc']['error']);
                 }
+                $this->newLine();
+            }
+            
+            // Hunter.io style confidence
+            if (isset($result['hunter_confidence'])) {
+                $this->info("Hunter.io Confidence: " . $result['hunter_confidence'] . "%");
+                $this->line("  Recommended filter: ~85-90% for catch-all emails");
                 $this->newLine();
             }
             
