@@ -1229,6 +1229,14 @@ class EmailVerificationService
                         $result['checks']['mailbox_full'] = $result['mailbox_full']; // Add to checks for score calculation
                         $result['catch_all'] = $isCatchAll; // Store catch-all status
                         
+                        // Store VRFY/EXPN verification method and confidence if available
+                        if (isset($smtpResult['verification_method'])) {
+                            $result['verification_method'] = $smtpResult['verification_method'];
+                        }
+                        if (isset($smtpResult['confidence'])) {
+                            $result['smtp_confidence'] = $smtpResult['confidence'];
+                        }
+                        
                         // If catch-all detected, handle it (AfterShip method)
                         if ($isCatchAll) {
                             $result['status'] = config('email-verification.catch_all_status', 'catch_all');
@@ -1965,6 +1973,58 @@ class EmailVerificationService
                         return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
                     }
                     
+                    // Try VRFY/EXPN commands first (if enabled)
+                    // These can verify email existence even on catch-all servers
+                    $vrfyResult = null;
+                    if (config('email-verification.enable_vrfy_check', true)) {
+                        // Try VRFY first (more commonly supported)
+                        $vrfyResult = $this->tryVrfyCommand($socket, $host, $email);
+                        
+                        // If VRFY worked, we have definitive answer - no need for catch-all check
+                        if ($vrfyResult !== null) {
+                            @fwrite($socket, "QUIT\r\n");
+                            @fclose($socket);
+                            
+                            Log::info('Email verified using VRFY command', [
+                                'email' => $email,
+                                'domain' => $domain,
+                                'valid' => $vrfyResult['valid'],
+                                'confidence' => $vrfyResult['confidence'] ?? 95,
+                            ]);
+                            
+                            return [
+                                'valid' => $vrfyResult['valid'],
+                                'mailbox_full' => false,
+                                'catch_all' => false, // VRFY bypasses catch-all
+                                'verification_method' => $vrfyResult['method'] ?? 'vrfy',
+                                'confidence' => $vrfyResult['confidence'] ?? 95,
+                            ];
+                        }
+                        
+                        // Try EXPN if VRFY didn't work
+                        $expnResult = $this->tryExpnCommand($socket, $host, $email);
+                        if ($expnResult !== null) {
+                            @fwrite($socket, "QUIT\r\n");
+                            @fclose($socket);
+                            
+                            Log::info('Email verified using EXPN command', [
+                                'email' => $email,
+                                'domain' => $domain,
+                                'valid' => $expnResult['valid'],
+                                'confidence' => $expnResult['confidence'] ?? 90,
+                            ]);
+                            
+                            return [
+                                'valid' => $expnResult['valid'],
+                                'mailbox_full' => false,
+                                'catch_all' => false, // EXPN bypasses catch-all
+                                'verification_method' => $expnResult['method'] ?? 'expn',
+                                'confidence' => $expnResult['confidence'] ?? 90,
+                            ];
+                        }
+                    }
+                    
+                    // VRFY/EXPN didn't work, proceed with catch-all test (AfterShip method)
                     // Now test catch-all with random email
                     $randomEmail = $this->generateRandomEmail($domain);
                     $catchAllResult = $this->performRcptToOnly($socket, $host, $randomEmail);
@@ -1982,6 +2042,7 @@ class EmailVerificationService
                         'random_email' => $randomEmail,
                         'is_catch_all' => $isCatchAll,
                         'response_code' => $catchAllResult['code'] ?? null,
+                        'vrfy_supported' => $vrfyResult === null ? 'not_supported' : 'supported',
                     ]);
                 } else {
                     // Public provider = always catch-all, but we skip the test
@@ -2070,6 +2131,212 @@ class EmailVerificationService
         // All attempts failed - return null to use sequential fallback
         // Sequential fallback will add to skip list if all retries fail
         return null;
+    }
+    
+    /**
+     * Try VRFY command to verify email existence
+     * VRFY (Verify) is an SMTP command that can check if an email address exists
+     * 
+     * Response codes:
+     * - 250/251 = Email exists
+     * - 550 = Email doesn't exist
+     * - 502 = Command not implemented (most common)
+     * - 252 = Cannot verify (catch-all or other reason)
+     * 
+     * @param resource $socket Already connected SMTP socket with handshake done
+     * @param string $host MX hostname (for logging)
+     * @param string $email Email to verify
+     * @return array|null Array with 'valid' and 'method' keys, or null if command not supported
+     */
+    private function tryVrfyCommand($socket, string $host, string $email): ?array
+    {
+        if (!config('email-verification.enable_vrfy_check', true)) {
+            return null;
+        }
+        
+        $operationTimeout = $this->getSmtpOperationTimeout();
+        stream_set_timeout($socket, $operationTimeout, 0);
+        
+        $isTimeout = function() use ($socket) {
+            $info = stream_get_meta_data($socket);
+            return $info['timed_out'] ?? false;
+        };
+        
+        try {
+            // VRFY command
+            @fwrite($socket, "VRFY {$email}\r\n");
+            $response = @fgets($socket, 515);
+            
+            if (!$response || $isTimeout()) {
+                return null;
+            }
+            
+            $code = (int)substr($response, 0, 3);
+            $message = trim(substr($response, 4));
+            
+            // 250/251 = Email exists
+            if ($code === 250 || $code === 251) {
+                Log::debug('VRFY command successful', [
+                    'host' => $host,
+                    'email' => $email,
+                    'response' => trim($response),
+                ]);
+                return [
+                    'valid' => true,
+                    'method' => 'vrfy',
+                    'confidence' => 95, // High confidence when VRFY works
+                ];
+            }
+            
+            // 550 = Email doesn't exist
+            if ($code === 550) {
+                Log::debug('VRFY command: email does not exist', [
+                    'host' => $host,
+                    'email' => $email,
+                    'response' => trim($response),
+                ]);
+                return [
+                    'valid' => false,
+                    'method' => 'vrfy',
+                    'confidence' => 95, // High confidence when VRFY works
+                ];
+            }
+            
+            // 502 = Command not implemented (most common)
+            // 252 = Cannot verify (catch-all or other reason)
+            // 500 = Syntax error
+            // 501 = Parameter syntax error
+            if (in_array($code, [502, 252, 500, 501], true)) {
+                Log::debug('VRFY command not supported', [
+                    'host' => $host,
+                    'email' => $email,
+                    'code' => $code,
+                    'response' => trim($response),
+                ]);
+                return null; // Command not supported, try other methods
+            }
+            
+            // Other codes - log for debugging
+            Log::debug('VRFY command returned unexpected code', [
+                'host' => $host,
+                'email' => $email,
+                'code' => $code,
+                'response' => trim($response),
+            ]);
+            
+            return null;
+            
+        } catch (\Exception $e) {
+            Log::warning('VRFY command failed', [
+                'host' => $host,
+                'email' => $email,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+    
+    /**
+     * Try EXPN command to verify email existence
+     * EXPN (Expand) is an SMTP command that can check if an email address or mailing list exists
+     * 
+     * Response codes:
+     * - 250 = Email/mailing list exists
+     * - 550 = Email/mailing list doesn't exist
+     * - 502 = Command not implemented (most common)
+     * 
+     * Note: EXPN is less commonly supported than VRFY, but worth trying
+     * 
+     * @param resource $socket Already connected SMTP socket with handshake done
+     * @param string $host MX hostname (for logging)
+     * @param string $email Email to verify
+     * @return array|null Array with 'valid' and 'method' keys, or null if command not supported
+     */
+    private function tryExpnCommand($socket, string $host, string $email): ?array
+    {
+        if (!config('email-verification.enable_vrfy_check', true)) {
+            return null; // Use same config as VRFY
+        }
+        
+        $operationTimeout = $this->getSmtpOperationTimeout();
+        stream_set_timeout($socket, $operationTimeout, 0);
+        
+        $isTimeout = function() use ($socket) {
+            $info = stream_get_meta_data($socket);
+            return $info['timed_out'] ?? false;
+        };
+        
+        try {
+            // EXPN command
+            @fwrite($socket, "EXPN {$email}\r\n");
+            $response = @fgets($socket, 515);
+            
+            if (!$response || $isTimeout()) {
+                return null;
+            }
+            
+            $code = (int)substr($response, 0, 3);
+            $message = trim(substr($response, 4));
+            
+            // 250 = Email/mailing list exists
+            if ($code === 250) {
+                Log::debug('EXPN command successful', [
+                    'host' => $host,
+                    'email' => $email,
+                    'response' => trim($response),
+                ]);
+                return [
+                    'valid' => true,
+                    'method' => 'expn',
+                    'confidence' => 90, // Slightly lower than VRFY
+                ];
+            }
+            
+            // 550 = Email/mailing list doesn't exist
+            if ($code === 550) {
+                Log::debug('EXPN command: email does not exist', [
+                    'host' => $host,
+                    'email' => $email,
+                    'response' => trim($response),
+                ]);
+                return [
+                    'valid' => false,
+                    'method' => 'expn',
+                    'confidence' => 90,
+                ];
+            }
+            
+            // 502 = Command not implemented (most common)
+            // 500 = Syntax error
+            // 501 = Parameter syntax error
+            if (in_array($code, [502, 500, 501], true)) {
+                Log::debug('EXPN command not supported', [
+                    'host' => $host,
+                    'email' => $email,
+                    'code' => $code,
+                    'response' => trim($response),
+                ]);
+                return null; // Command not supported
+            }
+            
+            // Other codes - log for debugging
+            Log::debug('EXPN command returned unexpected code', [
+                'host' => $host,
+                'email' => $email,
+                'code' => $code,
+                'response' => trim($response),
+            ]);
+            
+            return null;
+            
+        } catch (\Exception $e) {
+            Log::warning('EXPN command failed', [
+                'host' => $host,
+                'email' => $email,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
     }
     
     /**

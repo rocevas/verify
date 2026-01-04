@@ -891,6 +891,28 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | VRFY/EXPN Commands
+    |--------------------------------------------------------------------------
+    |
+    | Enable VRFY and EXPN SMTP commands to verify email existence.
+    | These commands can verify if an email exists even on catch-all servers.
+    |
+    | VRFY (Verify) - checks if an email address exists
+    | EXPN (Expand) - checks if an email address or mailing list exists
+    |
+    | Note: Most modern SMTP servers disable these commands for security
+    | reasons (502 Command not implemented), but some servers still support them.
+    | When enabled, the system will try VRFY first, then EXPN if VRFY fails.
+    |
+    | If VRFY/EXPN work, they provide definitive answer (95% confidence)
+    | and bypass the need for catch-all detection.
+    |
+    */
+
+    'enable_vrfy_check' => env('EMAIL_VERIFICATION_VRFY_CHECK', true),
+
+    /*
+    |--------------------------------------------------------------------------
     | Gravatar Check for Catch-All Emails
     |--------------------------------------------------------------------------
     |

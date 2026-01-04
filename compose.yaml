@@ -11,6 +11,11 @@ services:
         ports:
             - '${APP_PORT:-80}:80'
             - '${VITE_PORT:-5173}:${VITE_PORT:-5173}'
+        # Allow SMTP connections (port 25) for email verification
+        # Note: Most ISPs block port 25, so this may not work in all environments
+        cap_add:
+            - NET_RAW
+            - NET_BIND_SERVICE
         environment:
             WWWUSER: '${WWWUSER}'
             LARAVEL_SAIL: 1
@@ -25,7 +30,7 @@ services:
             - pgsql
             - redis
             - mailpit
-            - spamassassin
+#            - spamassassin
             - ollama
     pgsql:
         image: 'postgres:18-alpine'
@@ -74,25 +79,25 @@ services:
             - '${FORWARD_MAILPIT_DASHBOARD_PORT:-8025}:8025'
         networks:
             - sail
-    spamassassin:
-        image: 'instantlinux/spamassassin:latest'
-        ports:
-            - '${FORWARD_SPAMASSASSIN_PORT:-783}:783'
-        environment:
-            - ENABLE_LEARNING=true
-            - ENABLE_UPDATES=true
-        volumes:
-            - 'sail-spamassassin-logs:/var/log/spamassassin'
-            - 'sail-spamassassin-config:/etc/spamassassin'
-            - 'sail-spamassassin-data:/var/lib/spamassassin'
-        networks:
-            - sail
-        healthcheck:
-            test: ["CMD-SHELL", "timeout 1 bash -c 'echo > /dev/tcp/localhost/783' || exit 1"]
-            interval: 30s
-            timeout: 10s
-            retries: 5
-            start_period: 120s
+#    spamassassin:
+#        image: 'instantlinux/spamassassin:latest'
+#        ports:
+#            - '${FORWARD_SPAMASSASSIN_PORT:-783}:783'
+#        environment:
+#            - ENABLE_LEARNING=true
+#            - ENABLE_UPDATES=true
+#        volumes:
+#            - 'sail-spamassassin-logs:/var/log/spamassassin'
+#            - 'sail-spamassassin-config:/etc/spamassassin'
+#            - 'sail-spamassassin-data:/var/lib/spamassassin'
+#        networks:
+#            - sail
+#        healthcheck:
+#            test: ["CMD-SHELL", "timeout 1 bash -c 'echo > /dev/tcp/localhost/783' || exit 1"]
+#            interval: 30s
+#            timeout: 10s
+#            retries: 5
+#            start_period: 120s
     ollama:
         image: 'ollama/ollama:latest'
         ports:
