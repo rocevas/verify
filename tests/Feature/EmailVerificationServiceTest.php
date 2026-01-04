@@ -2,15 +2,13 @@
 
 use App\Models\User;
 use App\Services\EmailVerificationService;
-use App\Services\DmarcCheckService;
-use App\Services\GravatarService;
-use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Config;
 
 test('email verification service can verify basic email', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     $result = $service->verify(
         'test@example.com',
         $user->id,
@@ -19,7 +17,7 @@ test('email verification service can verify basic email', function () {
         null,
         'test'
     );
-    
+
     expect($result)->toBeArray();
     expect($result)->toHaveKey('email');
     expect($result)->toHaveKey('state');
@@ -31,11 +29,11 @@ test('email verification service can verify basic email', function () {
 test('email verification service handles public provider catch-all', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Enable catch-all detection
     Config::set('email-verification.enable_catch_all_detection', true);
     Config::set('email-verification.enable_smtp_check', true);
-    
+
     $result = $service->verify(
         'test@gmail.com',
         $user->id,
@@ -44,7 +42,7 @@ test('email verification service handles public provider catch-all', function ()
         null,
         'test'
     );
-    
+
     expect($result)->toBeArray();
     // Public provider should be marked as free if MX records exist
     expect($result)->toHaveKey('free');
@@ -59,11 +57,11 @@ test('email verification service handles public provider catch-all', function ()
 test('email verification service includes dmarc check for catch-all emails', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Enable DMARC check
     Config::set('email-verification.enable_dmarc_check', true);
     Config::set('email-verification.enable_catch_all_detection', true);
-    
+
     $result = $service->verify(
         'test@gmail.com',
         $user->id,
@@ -72,10 +70,10 @@ test('email verification service includes dmarc check for catch-all emails', fun
         null,
         'test'
     );
-    
+
     expect($result)->toBeArray();
     expect($result)->toHaveKey('catch_all');
-    
+
     // DMARC should be checked if catch-all is true (may be null if check failed, but key should exist)
     if ($result['catch_all'] ?? false) {
         expect($result)->toHaveKey('dmarc');
@@ -85,11 +83,11 @@ test('email verification service includes dmarc check for catch-all emails', fun
 test('email verification service calculates hunter.io confidence for catch-all emails', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Enable Hunter.io confidence
     Config::set('email-verification.enable_hunter_confidence', true);
     Config::set('email-verification.enable_catch_all_detection', true);
-    
+
     $result = $service->verify(
         'test@gmail.com',
         $user->id,
@@ -98,10 +96,10 @@ test('email verification service calculates hunter.io confidence for catch-all e
         null,
         'test'
     );
-    
+
     expect($result)->toBeArray();
     expect($result)->toHaveKey('catch_all');
-    
+
     // Hunter confidence should be calculated for catch-all emails
     if ($result['catch_all'] ?? false) {
         expect($result)->toHaveKey('hunter_confidence');
@@ -114,10 +112,10 @@ test('email verification service calculates hunter.io confidence for catch-all e
 test('email verification service includes verification method when vrfy/expn used', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Enable VRFY check
     Config::set('email-verification.enable_vrfy_check', true);
-    
+
     $result = $service->verify(
         'test@example.com',
         $user->id,
@@ -126,9 +124,9 @@ test('email verification service includes verification method when vrfy/expn use
         null,
         'test'
     );
-    
+
     expect($result)->toBeArray();
-    
+
     // Verification method may or may not be present (depends on SMTP server support)
     // But if present, it should be valid
     if (isset($result['verification_method'])) {
@@ -139,11 +137,11 @@ test('email verification service includes verification method when vrfy/expn use
 test('email verification service includes gravatar check for catch-all emails', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Enable Gravatar check
     Config::set('email-verification.enable_gravatar_check', true);
     Config::set('email-verification.enable_catch_all_detection', true);
-    
+
     $result = $service->verify(
         'test@gmail.com',
         $user->id,
@@ -152,10 +150,10 @@ test('email verification service includes gravatar check for catch-all emails', 
         null,
         'test'
     );
-    
+
     expect($result)->toBeArray();
     expect($result)->toHaveKey('catch_all');
-    
+
     // Gravatar should be checked if catch-all is true (may be false, but key should exist)
     if ($result['catch_all'] ?? false) {
         expect($result)->toHaveKey('gravatar');
@@ -166,7 +164,7 @@ test('email verification service includes gravatar check for catch-all emails', 
 test('email verification service returns correct structure', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     $result = $service->verify(
         'test@example.com',
         $user->id,
@@ -175,7 +173,7 @@ test('email verification service returns correct structure', function () {
         null,
         'test'
     );
-    
+
     // Check required fields
     expect($result)->toHaveKeys([
         'email',
@@ -192,7 +190,7 @@ test('email verification service returns correct structure', function () {
         'free',
         'mailbox_full',
     ]);
-    
+
     // Check types
     expect($result['email'])->toBeString();
     expect($result['state'])->toBeString();
@@ -208,7 +206,7 @@ test('email verification service returns correct structure', function () {
 test('email verification service handles invalid email format', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     $result = $service->verify(
         'invalid-email',
         $user->id,
@@ -217,7 +215,7 @@ test('email verification service handles invalid email format', function () {
         null,
         'test'
     );
-    
+
     expect($result)->toBeArray();
     expect($result['syntax'])->toBeFalse();
     expect($result['score'])->toBe(0);
@@ -226,7 +224,7 @@ test('email verification service handles invalid email format', function () {
 test('email verification service handles disposable email', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     $result = $service->verify(
         'test@10minutemail.com',
         $user->id,
@@ -235,7 +233,7 @@ test('email verification service handles disposable email', function () {
         null,
         'test'
     );
-    
+
     expect($result)->toBeArray();
     expect($result)->toHaveKey('disposable');
     // Disposable may be true or false depending on domain list
@@ -245,7 +243,7 @@ test('email verification service handles disposable email', function () {
 test('email verification service handles role-based email', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     $result = $service->verify(
         'admin@example.com',
         $user->id,
@@ -254,7 +252,7 @@ test('email verification service handles role-based email', function () {
         null,
         'test'
     );
-    
+
     expect($result)->toBeArray();
     expect($result['role'])->toBeTrue();
 });
@@ -262,13 +260,13 @@ test('email verification service handles role-based email', function () {
 test('hunter.io confidence calculation works correctly', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Enable all features
     Config::set('email-verification.enable_hunter_confidence', true);
     Config::set('email-verification.enable_catch_all_detection', true);
     Config::set('email-verification.enable_gravatar_check', true);
     Config::set('email-verification.enable_dmarc_check', true);
-    
+
     $result = $service->verify(
         'test@gmail.com',
         $user->id,
@@ -277,16 +275,16 @@ test('hunter.io confidence calculation works correctly', function () {
         null,
         'test'
     );
-    
+
     expect($result)->toBeArray();
     expect($result)->toHaveKey('catch_all');
-    
+
     if ($result['catch_all'] ?? false) {
         if (isset($result['hunter_confidence'])) {
             // Confidence should be between 0 and 100
             expect($result['hunter_confidence'])->toBeGreaterThanOrEqual(0);
             expect($result['hunter_confidence'])->toBeLessThanOrEqual(100);
-            
+
             // For catch-all without SMTP, confidence should be reduced
             if (!($result['smtp'] ?? false)) {
                 // Base confidence: syntax (10) + domain (15) + MX (20) = 45
@@ -302,11 +300,11 @@ test('hunter.io confidence calculation works correctly', function () {
 test('dmarc check integration works for catch-all emails', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Enable DMARC check
     Config::set('email-verification.enable_dmarc_check', true);
     Config::set('email-verification.enable_catch_all_detection', true);
-    
+
     $result = $service->verify(
         'test@gmail.com',
         $user->id,
@@ -315,19 +313,19 @@ test('dmarc check integration works for catch-all emails', function () {
         null,
         'test'
     );
-    
+
     expect($result)->toBeArray();
     expect($result)->toHaveKey('catch_all');
-    
+
     // DMARC should be checked if catch-all is true
     if ($result['catch_all'] ?? false) {
         expect($result)->toHaveKey('dmarc');
-        
+
         if (isset($result['dmarc']['policy'])) {
             // Policy should be valid if present
             expect($result['dmarc']['policy'])->toBeIn(['none', 'quarantine', 'reject', null]);
         }
-        
+
         // If DMARC reject policy, confidence boost should be present
         if (isset($result['dmarc']['policy']) && $result['dmarc']['policy'] === 'reject') {
             expect($result)->toHaveKey('dmarc_confidence_boost');
@@ -339,10 +337,10 @@ test('dmarc check integration works for catch-all emails', function () {
 test('email verification service handles config changes correctly', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Disable catch-all detection
     Config::set('email-verification.enable_catch_all_detection', false);
-    
+
     $result1 = $service->verify(
         'test@gmail.com',
         $user->id,
@@ -351,10 +349,10 @@ test('email verification service handles config changes correctly', function () 
         null,
         'test'
     );
-    
+
     // Enable catch-all detection
     Config::set('email-verification.enable_catch_all_detection', true);
-    
+
     $result2 = $service->verify(
         'test@gmail.com',
         $user->id,
@@ -363,15 +361,15 @@ test('email verification service handles config changes correctly', function () 
         null,
         'test'
     );
-    
+
     // Results should be different
     expect($result1)->toBeArray();
     expect($result2)->toBeArray();
-    
+
     // With catch-all detection, result should have catch_all flag
     expect($result2)->toHaveKey('catch_all');
     expect($result2['catch_all'])->toBeBool();
-    
+
     // If MX records exist, catch-all should be detected
     if ($result2['mx_record'] ?? false) {
         // Public provider should be detected as catch-all
@@ -382,7 +380,7 @@ test('email verification service handles config changes correctly', function () 
 test('email verification service does not break on exceptions', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Test with various edge cases
     $emails = [
         'test@example.com',
@@ -390,7 +388,7 @@ test('email verification service does not break on exceptions', function () {
         'test@gmail.com',
         'test@nonexistent-domain-12345.com',
     ];
-    
+
     foreach ($emails as $email) {
         try {
             $result = $service->verify(
@@ -401,7 +399,7 @@ test('email verification service does not break on exceptions', function () {
                 null,
                 'test'
             );
-            
+
             // Should always return array, never throw exception
             expect($result)->toBeArray();
             expect($result)->toHaveKey('email');
@@ -416,12 +414,12 @@ test('email verification service does not break on exceptions', function () {
 test('email verification service caches results correctly', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Clear cache
     Cache::flush();
-    
+
     $email = 'test@example.com';
-    
+
     // First verification
     $result1 = $service->verify(
         $email,
@@ -431,7 +429,7 @@ test('email verification service caches results correctly', function () {
         null,
         'test'
     );
-    
+
     // Second verification (should use cache for some checks)
     $result2 = $service->verify(
         $email,
@@ -441,7 +439,7 @@ test('email verification service caches results correctly', function () {
         null,
         'test'
     );
-    
+
     // Results should be consistent
     expect($result1)->toBeArray();
     expect($result2)->toBeArray();
@@ -451,14 +449,14 @@ test('email verification service caches results correctly', function () {
 test('email verification service handles all new features without breaking', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Enable all new features
     Config::set('email-verification.enable_vrfy_check', true);
     Config::set('email-verification.enable_dmarc_check', true);
     Config::set('email-verification.enable_hunter_confidence', true);
     Config::set('email-verification.enable_catch_all_detection', true);
     Config::set('email-verification.enable_gravatar_check', true);
-    
+
     $result = $service->verify(
         'test@gmail.com',
         $user->id,
@@ -467,17 +465,17 @@ test('email verification service handles all new features without breaking', fun
         null,
         'test'
     );
-    
+
     // Should not break with all features enabled
     expect($result)->toBeArray();
     expect($result)->toHaveKey('email');
     expect($result)->toHaveKey('state');
     expect($result)->toHaveKey('score');
-    
+
     // All new features should be present if applicable
     expect($result)->toHaveKey('catch_all');
     expect($result)->toHaveKey('free');
-    
+
     // Optional features may or may not be present
     // But if catch-all is true, these should be checked
     if ($result['catch_all'] ?? false) {
@@ -493,12 +491,12 @@ test('email verification service handles all new features without breaking', fun
 test('email verification service format response includes all new fields', function () {
     $user = User::factory()->withPersonalTeam()->create();
     $service = app(EmailVerificationService::class);
-    
+
     // Enable all features
     Config::set('email-verification.enable_hunter_confidence', true);
     Config::set('email-verification.enable_dmarc_check', true);
     Config::set('email-verification.enable_catch_all_detection', true);
-    
+
     $result = $service->verify(
         'test@gmail.com',
         $user->id,
@@ -507,11 +505,11 @@ test('email verification service format response includes all new fields', funct
         null,
         'test'
     );
-    
+
     // Check that formatResponse includes all new fields
     expect($result)->toHaveKey('catch_all');
     expect($result)->toHaveKey('free');
-    
+
     // Optional fields should be present if applicable
     if ($result['catch_all'] ?? false) {
         expect($result)->toHaveKey('dmarc');
@@ -519,12 +517,12 @@ test('email verification service format response includes all new fields', funct
             expect($result)->toHaveKey('hunter_confidence');
         }
     }
-    
+
     // Verification method should be present if VRFY/EXPN was used
     if (isset($result['verification_method'])) {
         expect($result['verification_method'])->toBeIn(['vrfy', 'expn']);
     }
-    
+
     // SMTP confidence should be present if VRFY/EXPN was used
     if (isset($result['smtp_confidence'])) {
         expect($result['smtp_confidence'])->toBeInt();

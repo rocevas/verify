@@ -2,912 +2,37 @@
 
 namespace App\Services;
 
-use App\Exceptions\SmtpRateLimitExceededException;
 use App\Models\EmailVerification;
-use App\Models\MxSkipList;
+use App\Services\EmailVerification\DomainValidationService;
+use App\Services\EmailVerification\EmailParserService;
+use App\Services\EmailVerification\GravatarService;
+use App\Services\EmailVerification\RiskAssessmentService;
+use App\Services\EmailVerification\ScoreCalculationService;
+use App\Services\EmailVerification\SmtpVerificationService;
+use App\Services\EmailVerification\VerificationResultService;
 use Illuminate\Support\Facades\Log;
-use Propaganistas\LaravelDisposableEmail\DisposableDomains;
-use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\RateLimiter;
-use Illuminate\Support\Facades\Process;
-use App\Services\MetricsService;
-use App\Services\GravatarService;
 
 class EmailVerificationService
 {
-    private function getSmtpTimeout(): int
-    {
-        return config('email-verification.smtp_timeout', 5);
-    }
-    
-    private function getSmtpConnectTimeout(): int
-    {
-        return config('email-verification.smtp_connect_timeout', config('email-verification.smtp_timeout', 2));
-    }
-    
-    private function getSmtpOperationTimeout(): int
-    {
-        return config('email-verification.smtp_operation_timeout', config('email-verification.smtp_timeout', 5));
-    }
-    
-    private function getSmtpRetries(): int
-    {
-        return config('email-verification.smtp_retries', 1);
-    }
-    
-    private function isSmtpCheckEnabled(): bool
-    {
-        return config('email-verification.enable_smtp_check', true);
+    public function __construct(
+        private EmailParserService $emailParserService,
+        private DomainValidationService $domainValidationService,
+        private RiskAssessmentService $riskAssessmentService,
+        private SmtpVerificationService $smtpVerificationService,
+        private ScoreCalculationService $scoreCalculationService,
+        private VerificationResultService $verificationResultService,
+        private MetricsService $metricsService
+    ) {
     }
 
-    private function getSmtpRateLimit(): array
-    {
-        return config('email-verification.smtp_rate_limit', [
-            'enable_global_limit' => false,
-            'max_checks_per_minute' => 100,
-            'max_checks_per_domain_per_minute' => 20,
-            'delay_between_checks' => 0.5,
-        ]);
-    }
 
-    private function getSmtpHeloHostname(): string
-    {
-        return config('email-verification.smtp_helo_hostname') ?? gethostname();
-    }
 
-    private function getRoleEmails(): array
-    {
-        return config('email-verification.role_emails', []);
-    }
-
-    private function getScoreWeights(): array
-    {
-        return config('email-verification.score_weights', [
-            'syntax' => 10,
-            'mx_record' => 30,
-            'smtp' => 50,
-            'disposable' => 10,
-            'role_penalty' => 20,
-        ]);
-    }
-
-    private function getBlacklistStatusMap(): array
-    {
-        return config('email-verification.blacklist_status_map', [
-            'spamtrap' => 'spamtrap',
-            'abuse' => 'abuse',
-            'do_not_mail' => 'do_not_mail',
-            'bounce' => 'invalid',
-            'complaint' => 'abuse',
-            'other' => 'do_not_mail',
-        ]);
-    }
-
-    private function getStatusRules(): array
-    {
-        return config('email-verification.status_rules', [
-            'smtp_valid' => 'valid',
-            'min_score_for_catch_all' => 50,
-            'role_emails_status' => 'risky',
-            'non_role_emails_status' => 'catch_all',
-            'default_invalid' => 'invalid',
-        ]);
-    }
-
-    private function getErrorMessages(): array
-    {
-        return config('email-verification.error_messages', [
-            'invalid_format' => 'Invalid email format',
-            'invalid_syntax' => 'Invalid email syntax',
-            'no_mx_records' => 'No MX records found',
-            'blacklisted' => 'Blacklisted: :reason:notes',
-        ]);
-    }
-
-    private function getMxCacheTtl(): int
-    {
-        return config('email-verification.mx_cache_ttl', 3600);
-    }
-
-    private function getRiskChecks(): array
-    {
-        return config('email-verification.risk_checks', [
-            'no_reply_status' => 'do_not_mail',
-            'typo_domain_status' => 'spamtrap',
-            'isp_esp_status' => 'do_not_mail',
-            'government_tld_status' => 'risky',
-            'enable_typo_check' => true,
-            'enable_isp_esp_check' => true,
-            'enable_government_check' => true,
-        ]);
-    }
-
-    private function getNoReplyKeywords(): array
-    {
-        return config('email-verification.no_reply_keywords', []);
-    }
-
-    private function getTypoDomains(): array
-    {
-        return config('email-verification.typo_domains', []);
-    }
-
-    private function getIspEspDomains(): array
-    {
-        return config('email-verification.isp_esp_domains', []);
-    }
-
-    private function getGovernmentTlds(): array
-    {
-        return config('email-verification.government_tlds', []);
-    }
-
-    private function checkNoReply(string $account): bool
-    {
-        $keywords = $this->getNoReplyKeywords();
-        $accountLower = strtolower($account);
-        
-        // Check exact match
-        if (in_array($accountLower, $keywords, true)) {
-            return true;
-        }
-        
-        // Check if account contains any keyword (for patterns like "no-reply-123")
-        foreach ($keywords as $keyword) {
-            if (str_contains($accountLower, $keyword)) {
-                return true;
-            }
-        }
-        
-        return false;
-    }
-
-    private function checkTypoDomain(string $domain): bool
-    {
-        $domainLower = strtolower($domain);
-        
-        // 1. Check known typo domains list (fastest)
-        $typoDomains = $this->getTypoDomains();
-        if (in_array($domainLower, $typoDomains, true)) {
-            return true;
-        }
-        
-        // 2. Automatic typo detection using fuzzy matching (if enabled)
-        if (config('email-verification.enable_automatic_typo_detection', true)) {
-            return $this->detectTypoDomainAutomatically($domainLower);
-        }
-        
-        return false;
-    }
-    
-    /**
-     * Get the correct domain for a typo domain
-     * Returns the corrected domain if typo is detected, null otherwise
-     */
-    private function getTypoCorrection(string $domain): ?string
-    {
-        $domainLower = strtolower($domain);
-        
-        // 1. Check known typo domains list with corrections (if config has mapping)
-        $typoCorrections = config('email-verification.typo_corrections', []);
-        if (isset($typoCorrections[$domainLower])) {
-            return $typoCorrections[$domainLower];
-        }
-        
-        // 2. Automatic typo detection using fuzzy matching (if enabled)
-        if (config('email-verification.enable_automatic_typo_detection', true)) {
-            return $this->findTypoCorrection($domainLower);
-        }
-        
-        return null;
-    }
-    
-    /**
-     * Find the correct domain for a typo using fuzzy matching
-     * Returns the corrected domain if typo is detected, null otherwise
-     */
-    private function findTypoCorrection(string $domain): ?string
-    {
-        // Get all known public provider domains
-        $publicProviderDomains = $this->getPublicProviderDomains();
-        
-        $maxDistance = config('email-verification.typo_detection_max_distance', 2);
-        $minSimilarity = config('email-verification.typo_detection_min_similarity', 0.85); // 85% similarity
-        
-        $bestMatch = null;
-        $bestSimilarity = 0;
-        
-        foreach ($publicProviderDomains as $providerDomain) {
-            // Skip if domains are identical
-            if ($domain === $providerDomain) {
-                continue;
-            }
-            
-            // Check Levenshtein distance (character edits needed)
-            $distance = levenshtein($domain, $providerDomain);
-            $maxLen = max(strlen($domain), strlen($providerDomain));
-            
-            if ($maxLen === 0) {
-                continue;
-            }
-            
-            // Calculate similarity (0-1, where 1 is identical)
-            $similarity = 1 - ($distance / $maxLen);
-            
-            // Check if within threshold
-            if ($distance <= $maxDistance && $similarity >= $minSimilarity) {
-                // Track best match
-                if ($similarity > $bestSimilarity) {
-                    $bestSimilarity = $similarity;
-                    $bestMatch = $providerDomain;
-                }
-            }
-        }
-        
-        // If no similar domain found, not a typo
-        if (!$bestMatch) {
-            return null;
-        }
-        
-        // Smart check: Only return correction if domain is suspicious typo
-        // If domain is valid (exists, has MX records), it might be a real domain
-        if ($this->isDomainSuspiciousTypo($domain, $bestMatch, $bestSimilarity)) {
-            return $bestMatch;
-        }
-        
-        return null;
-    }
-    
-    /**
-     * Automatically detect typo domains using fuzzy matching
-     * Compares domain against known public provider domains
-     * Smart logic: Only marks as typo if domain is invalid or suspicious
-     */
-    private function detectTypoDomainAutomatically(string $domain): bool
-    {
-        // Get all known public provider domains
-        $publicProviderDomains = $this->getPublicProviderDomains();
-        
-        $maxDistance = config('email-verification.typo_detection_max_distance', 2);
-        $minSimilarity = config('email-verification.typo_detection_min_similarity', 0.85); // 85% similarity
-        
-        $bestMatch = null;
-        $bestSimilarity = 0;
-        
-        foreach ($publicProviderDomains as $providerDomain) {
-            // Skip if domains are identical
-            if ($domain === $providerDomain) {
-                continue;
-            }
-            
-            // Check Levenshtein distance (character edits needed)
-            $distance = levenshtein($domain, $providerDomain);
-            $maxLen = max(strlen($domain), strlen($providerDomain));
-            
-            if ($maxLen === 0) {
-                continue;
-            }
-            
-            // Calculate similarity (0-1, where 1 is identical)
-            $similarity = 1 - ($distance / $maxLen);
-            
-            // Check if within threshold
-            if ($distance <= $maxDistance && $similarity >= $minSimilarity) {
-                // Track best match
-                if ($similarity > $bestSimilarity) {
-                    $bestSimilarity = $similarity;
-                    $bestMatch = $providerDomain;
-                }
-            }
-        }
-        
-        // If no similar domain found, not a typo
-        if (!$bestMatch) {
-            return false;
-        }
-        
-        // Smart check: Only mark as typo if domain is invalid or suspicious
-        // If domain is valid (exists, has MX records), it might be a real domain
-        return $this->isDomainSuspiciousTypo($domain, $bestMatch, $bestSimilarity);
-    }
-    
-    /**
-     * Smart typo detection: Only mark as typo if domain is suspicious
-     * Real domains (with valid MX records) are not marked as typo
-     */
-    private function isDomainSuspiciousTypo(string $domain, string $providerDomain, float $similarity): bool
-    {
-        // 1. Check if domain has valid MX records
-        $mxRecords = $this->getMxRecords($domain);
-        $hasMxRecords = !empty($mxRecords);
-        
-        // 2. Check domain validity (DNS resolution)
-        $domainValidity = $this->checkDomainValidity($domain);
-        $isValidDomain = $domainValidity['valid'] ?? false;
-        
-        // 3. If domain is valid and has MX records, it might be a real domain
-        // Don't mark as typo if it's a legitimate domain
-        if ($isValidDomain && $hasMxRecords) {
-            // Additional check: Is it too similar to be a coincidence?
-            // If similarity is very high (>= 95%) and it's a common typo pattern, still mark as typo
-            if ($similarity >= 0.95 && $this->isLikelyTypo($domain, $providerDomain)) {
-                // Very high similarity + common typo pattern = likely typo even with MX records
-                // (spammers sometimes register typo domains with MX records)
-                Log::info('Automatic typo domain detected (high similarity despite valid MX)', [
-                    'domain' => $domain,
-                    'provider_domain' => $providerDomain,
-                    'similarity' => round($similarity * 100, 2) . '%',
-                    'has_mx' => $hasMxRecords,
-                ]);
-                return true;
-            }
-            
-            // Domain is valid and has MX records - likely a real domain, not a typo
-            Log::debug('Similar domain found but not marked as typo (valid domain with MX records)', [
-                'domain' => $domain,
-                'provider_domain' => $providerDomain,
-                'similarity' => round($similarity * 100, 2) . '%',
-                'has_mx' => $hasMxRecords,
-            ]);
-            return false;
-        }
-        
-        // 4. Domain is invalid or has no MX records + similar to provider = typo
-        if ($this->isLikelyTypo($domain, $providerDomain)) {
-            Log::info('Automatic typo domain detected (invalid domain or no MX records)', [
-                'domain' => $domain,
-                'provider_domain' => $providerDomain,
-                'similarity' => round($similarity * 100, 2) . '%',
-                'has_mx' => $hasMxRecords,
-                'is_valid' => $isValidDomain,
-            ]);
-            return true;
-        }
-        
-        return false;
-    }
-    
-    /**
-     * Get all public provider domains for typo detection
-     */
-    private function getPublicProviderDomains(): array
-    {
-        $cacheKey = 'public_provider_domains_list';
-        $ttl = 3600; // 1 hour cache
-        
-        return Cache::remember($cacheKey, $ttl, function () {
-            $domains = [];
-            
-            // Get domains from public_providers config (structured providers with MX patterns)
-            $providers = config('email-verification.public_providers', []);
-            foreach ($providers as $providerConfig) {
-                $providerDomains = $providerConfig['domains'] ?? [];
-                $domains = array_merge($domains, $providerDomains);
-            }
-            
-            // Get domains from free-email-providers config (imported from Go email-verifier)
-            $freeEmailProviders = config('free-email-providers.domains', []);
-            $domains = array_merge($domains, $freeEmailProviders);
-            
-            return array_unique($domains);
-        });
-    }
-    
-    /**
-     * Check if domain is a free email provider (by domain name only, no MX check)
-     * This is a simpler check used for early free flag setting
-     */
-    private function isFreeEmailProviderByDomain(string $domain): bool
-    {
-        $domainLower = strtolower($domain);
-        $publicProviderDomains = $this->getPublicProviderDomains();
-        
-        return in_array($domainLower, $publicProviderDomains, true);
-    }
-    
-    /**
-     * Check if domain is likely a typo (not just similar by chance)
-     * Uses common typo patterns and domain structure analysis
-     */
-    private function isLikelyTypo(string $domain, string $providerDomain): bool
-    {
-        // Extract base domain (without TLD)
-        $domainBase = $this->getDomainBase($domain);
-        $providerBase = $this->getDomainBase($providerDomain);
-        
-        // If base domains are very similar, it's likely a typo
-        $baseDistance = levenshtein($domainBase, $providerBase);
-        $baseMaxLen = max(strlen($domainBase), strlen($providerBase));
-        
-        if ($baseMaxLen === 0) {
-            return false;
-        }
-        
-        $baseSimilarity = 1 - ($baseDistance / $baseMaxLen);
-        
-        // If base similarity is high (>= 80%), it's likely a typo
-        if ($baseSimilarity >= 0.80) {
-            return true;
-        }
-        
-        // Check for common typo patterns
-        $commonTypoPatterns = [
-            // Character insertion (gmail.com -> gmailc.com)
-            function($d, $p) { return str_contains($d, $p) && strlen($d) === strlen($p) + 1; },
-            // Character deletion (gmail.com -> gmai.com)
-            function($d, $p) { return str_contains($p, $d) && strlen($d) === strlen($p) - 1; },
-            // Character substitution (gmail.com -> gma1l.com)
-            function($d, $p) {
-                if (strlen($d) !== strlen($p)) return false;
-                $diff = 0;
-                for ($i = 0; $i < strlen($d); $i++) {
-                    if ($d[$i] !== $p[$i]) $diff++;
-                }
-                return $diff <= 2; // Max 2 character substitutions
-            },
-        ];
-        
-        foreach ($commonTypoPatterns as $pattern) {
-            if ($pattern($domainBase, $providerBase)) {
-                return true;
-            }
-        }
-        
-        return false;
-    }
-    
-    /**
-     * Extract base domain (without TLD)
-     * Example: gmail.com -> gmail
-     */
-    private function getDomainBase(string $domain): string
-    {
-        $parts = explode('.', $domain);
-        if (count($parts) < 2) {
-            return $domain;
-        }
-        
-        // Remove TLD (last part)
-        array_pop($parts);
-        
-        return implode('.', $parts);
-    }
-
-    private function checkIspEspDomain(string $domain): bool
-    {
-        $ispEspDomains = $this->getIspEspDomains();
-        $domainLower = strtolower($domain);
-        
-        // Check exact match
-        if (in_array($domainLower, $ispEspDomains, true)) {
-            return true;
-        }
-        
-        // Check if domain ends with any ISP/ESP domain (for subdomains)
-        foreach ($ispEspDomains as $ispDomain) {
-            if (str_ends_with($domainLower, '.' . $ispDomain) || $domainLower === $ispDomain) {
-                return true;
-            }
-        }
-        
-        return false;
-    }
-
-    private function checkGovernmentTld(string $domain): bool
-    {
-        $governmentTlds = $this->getGovernmentTlds();
-        $parts = explode('.', strtolower($domain));
-        
-        if (empty($parts)) {
-            return false;
-        }
-        
-        // Get TLD (last part)
-        $tld = end($parts);
-        
-        return in_array($tld, $governmentTlds, true);
-    }
-
-    /**
-     * Check if MX server should be skipped
-     */
-    private function shouldSkipMxServer(string $mxHost): bool
-    {
-        $skipList = config('email-verification.mx_skip_list', []);
-        $mxHostLower = strtolower($mxHost);
-        
-        // Check exact match in config (manual entries)
-        if (in_array($mxHostLower, $skipList, true)) {
-            return true;
-        }
-        
-        // Check subdomain match (e.g., mail.securence.com -> securence.com)
-        foreach ($skipList as $skipDomain) {
-            if (str_ends_with($mxHostLower, '.' . $skipDomain) || $mxHostLower === $skipDomain) {
-                return true;
-            }
-        }
-        
-        // Check database for auto-added servers (with caching for performance)
-        $cacheKey = "mx_skip_db_{$mxHostLower}";
-        return Cache::remember($cacheKey, 3600, function () use ($mxHostLower) {
-            return MxSkipList::isSkipped($mxHostLower);
-        });
-    }
-
-    /**
-     * Add MX server to skip list (auto-add feature)
-     */
-    private function addMxToSkipList(string $mxHost, string $reason = 'SMTP connection failed', ?string $response = null): void
-    {
-        if (!config('email-verification.mx_skip_auto_add', true)) {
-            return;
-        }
-        
-        try {
-            $expiresInDays = config('email-verification.mx_skip_auto_add_expires_days', 30);
-            
-            // Store in database (persistent)
-            MxSkipList::addOrUpdate(
-                $mxHost,
-                $reason,
-                $response,
-                false, // is_manual = false (auto-added)
-                $expiresInDays
-            );
-            
-            // Clear cache to force refresh
-            $mxHostLower = strtolower($mxHost);
-            Cache::forget("mx_skip_db_{$mxHostLower}");
-            
-            Log::info('MX server added to skip list', [
-                'mx_host' => $mxHost,
-                'reason' => $reason,
-                'expires_in_days' => $expiresInDays,
-            ]);
-        } catch (\Exception $e) {
-            Log::warning('Failed to add MX server to skip list', [
-                'mx_host' => $mxHost,
-                'reason' => $reason,
-                'error' => $e->getMessage(),
-            ]);
-        }
-    }
-
-    /**
-     * Check if domain is unsupported for SMTP verification
-     */
-    private function checkUnsupportedDomain(string $domain): bool
-    {
-        $unsupported = config('email-verification.unsupported_domains', []);
-        $domainLower = strtolower($domain);
-        
-        // Exact match
-        if (in_array($domainLower, $unsupported, true)) {
-            return true;
-        }
-        
-        // Subdomain check
-        foreach ($unsupported as $unsupportedDomain) {
-            if (str_ends_with($domainLower, '.' . $unsupportedDomain) || $domainLower === $unsupportedDomain) {
-                return true;
-            }
-        }
-        
-        return false;
-    }
-
-    /**
-     * Check if catch-all check should be skipped for domain
-     */
-    private function shouldSkipCatchAllCheck(string $domain): bool
-    {
-        $skipDomains = config('email-verification.catch_all_skip_domains', []);
-        $domainLower = strtolower($domain);
-        
-        return in_array($domainLower, $skipDomains, true);
-    }
-
-    /**
-     * Generate random email address for catch-all testing (AfterShip method)
-     * Uses 32 alphanumeric characters like AfterShip does
-     */
-    private function generateRandomEmail(string $domain): string
-    {
-        $characters = '0123456789abcdefghijklmnopqrstuvwxyz';
-        $randomString = '';
-        $length = 32; // AfterShip uses 32 characters
-        
-        for ($i = 0; $i < $length; $i++) {
-            $randomString .= $characters[rand(0, strlen($characters) - 1)];
-        }
-        
-        return strtolower($randomString) . '@' . $domain;
-    }
-
-    /**
-     * Check if domain is a public email provider
-     */
-    private function isPublicProvider(string $domain, array $mxRecords): ?array
-    {
-        $providers = config('email-verification.public_providers', []);
-        $domainLower = strtolower($domain);
-        
-        foreach ($providers as $providerName => $providerConfig) {
-            // Check domain match
-            $providerDomains = $providerConfig['domains'] ?? [];
-            if (in_array($domainLower, $providerDomains, true)) {
-                return $providerConfig;
-            }
-            
-            // Check MX patterns
-            $mxPatterns = $providerConfig['mx_patterns'] ?? [];
-            foreach ($mxRecords as $mx) {
-                $mxHost = strtolower($mx['host'] ?? '');
-                foreach ($mxPatterns as $pattern) {
-                    if (str_contains($mxHost, strtolower($pattern))) {
-                        return $providerConfig;
-                    }
-                }
-            }
-        }
-        
-        return null;
-    }
-
-    /**
-     * Get MX records for domain (with caching)
-     */
-    private function getMxRecords(string $domain): array
-    {
-        $cacheKey = "mx_records_{$domain}";
-        $ttl = $this->getMxCacheTtl();
-        
-        return Cache::remember($cacheKey, $ttl, function () use ($domain) {
-            $mxHosts = [];
-            $mxWeights = [];
-            
-            if (!getmxrr($domain, $mxHosts, $mxWeights)) {
-                // Try DNS record method
-                if (function_exists('dns_get_record')) {
-                    $dnsRecords = dns_get_record($domain, DNS_MX);
-                    if (empty($dnsRecords)) {
-                        return [];
-                    }
-                    
-                    foreach ($dnsRecords as $record) {
-                        $mxHosts[] = $record['target'];
-                        $mxWeights[] = $record['pri'];
-                    }
-                } else {
-                    return [];
-                }
-            }
-            
-            // Combine and sort by priority
-            $mxRecords = [];
-            foreach ($mxHosts as $index => $host) {
-                $mxRecords[] = [
-                    'host' => $host,
-                    'pri' => $mxWeights[$index] ?? 10,
-                ];
-            }
-            
-            // Sort by priority (lower priority number = higher priority)
-            usort($mxRecords, function ($a, $b) {
-                return $a['pri'] <=> $b['pri'];
-            });
-            
-            return $mxRecords;
-        });
-    }
-
-    private function checkSmtpRateLimit(string $domain): bool
-    {
-        $rateLimit = $this->getSmtpRateLimit();
-        
-        // Global rate limit (optional - disabled by default for queue workers)
-        if ($rateLimit['enable_global_limit'] ?? false) {
-            $globalKey = 'smtp_check_global';
-            $globalLimit = RateLimiter::tooManyAttempts($globalKey, $rateLimit['max_checks_per_minute']);
-            if ($globalLimit) {
-                Log::warning('SMTP rate limit exceeded (global)', [
-                    'limit' => $rateLimit['max_checks_per_minute'],
-                ]);
-                return false;
-            }
-            RateLimiter::hit($globalKey, 60); // 60 seconds window
-        }
-
-        // Per-domain rate limit (most important - prevents ban from specific servers)
-        $domainKey = 'smtp_check_domain_' . md5($domain);
-        $domainLimit = RateLimiter::tooManyAttempts($domainKey, $rateLimit['max_checks_per_domain_per_minute']);
-        if ($domainLimit) {
-            // Calculate retry after time (60 seconds = 1 minute window)
-            $retryAfter = 60;
-            
-            // If we're in a queue job context, throw exception to trigger retry
-            // Optimize: Check if VerifyEmailJob is in call stack (limit to 5 levels for performance)
-            $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 5);
-            foreach ($backtrace as $trace) {
-                if (isset($trace['class']) && str_contains($trace['class'], 'VerifyEmailJob')) {
-                    throw new SmtpRateLimitExceededException($domain, $retryAfter);
-                }
-            }
-            
-            // Otherwise, just skip SMTP check (synchronous call)
-            Log::info('SMTP rate limit exceeded (domain) - skipping check', [
-                'domain' => $domain,
-                'limit' => $rateLimit['max_checks_per_domain_per_minute'],
-            ]);
-            return false;
-        }
-
-        // Increment domain counter
-        RateLimiter::hit($domainKey, 60);
-
-        // Add small delay between checks to same domain (helps avoid detection)
-        $delay = $rateLimit['delay_between_checks'] ?? 0.5;
-        if ($delay > 0) {
-            usleep((int)($delay * 1000000)); // Convert seconds to microseconds
-        }
-
-        return true;
-    }
-
-    /**
-     * Calculate and add duration to result
-     */
-    private function addDuration(array &$result, float $startTime): void
-    {
-        $endTime = microtime(true);
-        $result['duration'] = round($endTime - $startTime, 2); // Duration in seconds (rounded to 2 decimal places)
-    }
-    
-    /**
-     * Determine state and result based on checks and current status
-     * Following Emailable API format: https://help.emailable.com/en-us/article/verification-results-all-possible-states-and-reasons-fjsjn2/
-     */
-    private function determineStateAndResult(array $result): array
-    {
-        $currentStatus = $result['status'] ?? 'unknown';
-        $error = $result['error'] ?? null;
-        
-        // Check for syntax error first (highest priority)
-        if (!($result['syntax'] ?? false)) {
-            return [
-                'state' => 'undeliverable',
-                'result' => 'syntax_error',
-            ];
-        }
-        
-        // Check for typo domain
-        if ($result['typo_domain'] ?? false) {
-            return [
-                'state' => 'undeliverable',
-                'result' => 'typo',
-            ];
-        }
-        
-        // Check for disposable email
-        if ($result['disposable'] ?? false) {
-            return [
-                'state' => 'undeliverable',
-                'result' => 'disposable',
-            ];
-        }
-        
-        // Check for blacklist/blocked
-        if ($result['blacklist'] ?? false || $currentStatus === 'spamtrap' || $currentStatus === 'abuse' || $currentStatus === 'do_not_mail') {
-            return [
-                'state' => 'undeliverable',
-                'result' => 'blocked',
-            ];
-        }
-        
-        // Check for mailbox full
-        if ($result['mailbox_full'] ?? false) {
-            return [
-                'state' => 'risky',
-                'result' => 'mailbox_full',
-            ];
-        }
-        
-        // Check for role-based email
-        if ($result['role'] ?? false) {
-            return [
-                'state' => 'risky',
-                'result' => 'role',
-            ];
-        }
-        
-        // Check for catch-all
-        if ($currentStatus === 'catch_all') {
-            return [
-                'state' => 'risky',
-                'result' => 'catch_all',
-            ];
-        }
-        
-        // Check for valid email (SMTP verified or high confidence)
-        if ($result['smtp'] ?? false) {
-            return [
-                'state' => 'deliverable',
-                'result' => 'valid',
-            ];
-        }
-        
-        // If MX records exist and domain is valid, but SMTP not checked (public providers)
-        if (($result['mx_record'] ?? false) && ($result['domain_validity'] ?? false) && $currentStatus === 'valid') {
-            return [
-                'state' => 'deliverable',
-                'result' => 'valid',
-            ];
-        }
-        
-        // Check for invalid domain or no MX records
-        if (!($result['mx_record'] ?? false) || !($result['domain_validity'] ?? false)) {
-            if ($currentStatus === 'invalid') {
-                return [
-                    'state' => 'undeliverable',
-                    'result' => 'mailbox_not_found',
-                ];
-            }
-        }
-        
-        // Check for connection/timeout errors
-        if ($error && (
-            str_contains(strtolower($error), 'timeout') ||
-            str_contains(strtolower($error), 'connection') ||
-            str_contains(strtolower($error), 'unavailable') ||
-            str_contains(strtolower($error), 'could not connect')
-        )) {
-            return [
-                'state' => 'unknown',
-                'result' => null,
-            ];
-        }
-        
-        // Check for unexpected errors
-        if ($error && $currentStatus === 'unknown') {
-            return [
-                'state' => 'error',
-                'result' => 'error',
-            ];
-        }
-        
-        // Default: unknown
-        if ($currentStatus === 'unknown') {
-            return [
-                'state' => 'unknown',
-                'result' => null,
-            ];
-        }
-        
-        // Fallback: map old status to new format
-        return [
-            'state' => match($currentStatus) {
-                'valid' => 'deliverable',
-                'invalid', 'spamtrap', 'abuse', 'do_not_mail' => 'undeliverable',
-                'risky', 'catch_all' => 'risky',
-                default => 'unknown',
-            },
-            'result' => match($currentStatus) {
-                'valid' => 'valid',
-                'invalid' => 'mailbox_not_found',
-                'spamtrap', 'abuse', 'do_not_mail' => 'blocked',
-                'risky' => 'catch_all',
-                'catch_all' => 'catch_all',
-                default => null,
-            },
-        ];
-    }
 
     public function verify(string $email, ?int $userId = null, ?int $teamId = null, ?int $tokenId = null, ?int $bulkJobId = null, ?string $source = null): array
     {
         // Start timing
         $startTime = microtime(true);
-        
+
         $result = [
             'email' => $email,
             'status' => 'unknown',
@@ -936,32 +61,32 @@ class EmailVerificationService
         ];
 
         $parts = null;
-        
+
         try {
             // Parse email
-            $parts = $this->parseEmail($email);
+            $parts = $this->emailParserService->parseEmail($email);
             if (!$parts) {
                 $result['status'] = 'invalid';
-                $result['error'] = $this->getErrorMessages()['invalid_format'];
+                $result['error'] = $this->verificationResultService->getErrorMessages()['invalid_format'];
                 $result['score'] = 0;
                 // Save even invalid emails for tracking
-                $this->addDuration($result, $startTime);
-                $this->saveVerification($result, $userId, $teamId, $tokenId, ['account' => null, 'domain' => null], $bulkJobId, $source);
-                return $this->formatResponse($result);
+                $this->verificationResultService->addDuration($result, $startTime);
+                $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, ['account' => null, 'domain' => null], $bulkJobId, $source);
+                return $this->verificationResultService->formatResponse($result);
             }
 
             $result['account'] = $parts['account'];
             $result['domain'] = $parts['domain'];
 
             // 0.5. Email alias detection (before other checks)
-            $aliasOf = $this->detectAlias($email);
+            $aliasOf = $this->emailParserService->detectAlias($email);
             if ($aliasOf && $aliasOf !== $email) {
                 $result['alias_of'] = $aliasOf;
                 $result['aliasOf'] = $aliasOf; // Keep for backward compatibility
             }
 
             // 0.6. Typo suggestions (check for typos even if syntax is valid)
-            $typoSuggestion = $this->getTypoSuggestions($email);
+            $typoSuggestion = $this->riskAssessmentService->getTypoSuggestions($email);
             if ($typoSuggestion && $typoSuggestion !== $email) {
                 $result['typo_suggestion'] = $typoSuggestion;
                 $result['typoSuggestion'] = $typoSuggestion; // Keep for backward compatibility
@@ -972,100 +97,100 @@ class EmailVerificationService
             }
 
             // 1. Syntax check
-            $syntaxCheck = $this->checkSyntax($email);
+            $syntaxCheck = $this->emailParserService->checkSyntax($email);
             $result['syntax'] = $syntaxCheck;
             $result['checks']['syntax'] = $syntaxCheck; // Update checks array
             if (!$syntaxCheck) {
                 // Set free flag early (by domain name only)
-                $result['is_free'] = $this->isFreeEmailProviderByDomain($parts['domain']);
+                $result['is_free'] = $this->riskAssessmentService->isFreeEmailProviderByDomain($parts['domain']);
                 $result['free'] = $result['is_free']; // Keep for backward compatibility
                 $result['checks']['free'] = $result['free']; // Add to checks for score calculation
                 $result['checks']['is_free'] = $result['is_free']; // Also add is_free for compatibility
-                
+
                 $result['status'] = 'invalid';
-                $result['error'] = $this->getErrorMessages()['invalid_syntax'];
+                $result['error'] = $this->verificationResultService->getErrorMessages()['invalid_syntax'];
                 $result['score'] = 0;
-                $this->addDuration($result, $startTime);
+                $this->verificationResultService->addDuration($result, $startTime);
                 // Determine state and result before saving
-                $stateAndResult = $this->determineStateAndResult($result);
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                 $result['state'] = $stateAndResult['state'];
                 $result['result'] = $stateAndResult['result'];
-                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $this->formatResponse($result);
+                $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                return $this->verificationResultService->formatResponse($result);
             }
 
             // 2. Blacklist check
             $blacklist = \App\Models\Blacklist::isBlacklisted($email);
             if ($blacklist) {
-                $statusMap = $this->getBlacklistStatusMap();
+                $statusMap = $this->verificationResultService->getBlacklistStatusMap();
                 $result['status'] = $statusMap[$blacklist->reason] ?? 'do_not_mail';
-                $errorTemplate = $this->getErrorMessages()['blacklisted'];
+                $errorTemplate = $this->verificationResultService->getErrorMessages()['blacklisted'];
                 $notes = $blacklist->notes ? " - {$blacklist->notes}" : '';
                 $result['error'] = str_replace([':reason', ':notes'], [$blacklist->reason, $notes], $errorTemplate);
                 $result['score'] = 0;
                 $result['blacklist'] = true;
                 $result['checks']['blacklist'] = true; // Update checks array
-                $this->addDuration($result, $startTime);
-                $this->addDuration($result, $startTime);
-                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $this->formatResponse($result);
+                $this->verificationResultService->addDuration($result, $startTime);
+                $this->verificationResultService->addDuration($result, $startTime);
+                $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                return $this->verificationResultService->formatResponse($result);
             }
             $result['blacklist'] = false;
             $result['checks']['blacklist'] = false; // Update checks array
 
             // 2.5. No-reply keywords check (synthetic addresses / list poisoning)
-            $noReplyCheck = $this->checkNoReply($parts['account']);
+            $noReplyCheck = $this->riskAssessmentService->checkNoReply($parts['account']);
             $result['no_reply'] = $noReplyCheck;
             $result['checks']['no_reply'] = $noReplyCheck; // Update checks array
             if ($noReplyCheck) {
-                $riskChecks = $this->getRiskChecks();
+                $riskChecks = $this->riskAssessmentService->getRiskChecks();
                 $result['status'] = $riskChecks['no_reply_status'] ?? 'do_not_mail';
                 $result['score'] = 0;
-                $this->addDuration($result, $startTime);
-                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $this->formatResponse($result);
+                $this->verificationResultService->addDuration($result, $startTime);
+                $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                return $this->verificationResultService->formatResponse($result);
             }
 
             // 2.6. Typo domain check (spam trap domains)
-            $riskChecks = $this->getRiskChecks();
+            $riskChecks = $this->riskAssessmentService->getRiskChecks();
             if ($riskChecks['enable_typo_check'] ?? true) {
-                $typoCheck = $this->checkTypoDomain($parts['domain']);
+                $typoCheck = $this->riskAssessmentService->checkTypoDomain($parts['domain']);
                 $result['typo_domain'] = $typoCheck;
                 $result['checks']['typo_domain'] = $typoCheck; // Update checks array
                 if ($typoCheck) {
                     // Get the corrected domain
-                    $correctedDomain = $this->getTypoCorrection($parts['domain']);
+                    $correctedDomain = $this->riskAssessmentService->getTypoCorrection($parts['domain']);
                     if ($correctedDomain) {
                         // Build the corrected email address
                         $result['did_you_mean'] = $parts['account'] . '@' . $correctedDomain;
                     }
-                    
+
                     $result['status'] = $riskChecks['typo_domain_status'] ?? 'spamtrap';
                     $result['score'] = 0;
                     $result['error'] = 'Typo domain detected (likely spam trap)';
-                    $this->addDuration($result, $startTime);
-                    $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                    $this->verificationResultService->addDuration($result, $startTime);
+                    $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                     return $result;
                 }
             }
 
             // 2.7. ISP/ESP infrastructure domain check
             if ($riskChecks['enable_isp_esp_check'] ?? true) {
-                $result['isp_esp'] = $this->checkIspEspDomain($parts['domain']);
+                $result['isp_esp'] = $this->riskAssessmentService->checkIspEspDomain($parts['domain']);
                 $result['checks']['isp_esp'] = $result['isp_esp']; // Update checks array
                 if ($result['isp_esp']) {
                     $result['status'] = $riskChecks['isp_esp_status'] ?? 'do_not_mail';
                     $result['score'] = 0;
                     $result['error'] = 'ISP/ESP infrastructure domain (not for marketing)';
-                    $this->addDuration($result, $startTime);
-                    $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                    $this->verificationResultService->addDuration($result, $startTime);
+                    $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                     return $result;
                 }
             }
 
             // 2.8. Government/registry TLD check
             if ($riskChecks['enable_government_check'] ?? true) {
-                $result['government_tld'] = $this->checkGovernmentTld($parts['domain']);
+                $result['government_tld'] = $this->riskAssessmentService->checkGovernmentTld($parts['domain']);
                 $result['checks']['government_tld'] = $result['government_tld']; // Update checks array
                 if ($result['government_tld']) {
                     $result['status'] = $riskChecks['government_tld_status'] ?? 'risky';
@@ -1074,35 +199,35 @@ class EmailVerificationService
             }
 
             // 3. Disposable email check
-            $disposableCheck = $this->checkDisposable($parts['domain']);
+            $disposableCheck = $this->emailParserService->checkDisposable($parts['domain']);
             $result['disposable'] = $disposableCheck;
             $result['checks']['disposable'] = $disposableCheck; // Update checks array
             if ($disposableCheck) {
                 // Set free flag early (by domain name only)
-                $result['free'] = $this->isFreeEmailProviderByDomain($parts['domain']);
+                $result['free'] = $this->riskAssessmentService->isFreeEmailProviderByDomain($parts['domain']);
                 $result['is_free'] = $result['free']; // Keep for backward compatibility
                 $result['checks']['free'] = $result['free']; // Add to checks for score calculation
                 $result['checks']['is_free'] = $result['is_free']; // Also add is_free for compatibility
-                
+
                 $result['status'] = 'do_not_mail';
                 $result['score'] = 0;
-                $this->addDuration($result, $startTime);
-                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $this->formatResponse($result);
+                $this->verificationResultService->addDuration($result, $startTime);
+                $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                return $this->verificationResultService->formatResponse($result);
             }
 
             // 3.5. Unsupported domain check
-            if ($this->checkUnsupportedDomain($parts['domain'])) {
+            if ($this->domainValidationService->checkUnsupportedDomain($parts['domain'])) {
                 $result['status'] = config('email-verification.unsupported_domain_status', 'skipped');
                 $result['score'] = 0;
                 $result['error'] = 'Domain does not support SMTP verification';
-                $this->addDuration($result, $startTime);
-                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $this->formatResponse($result);
+                $this->verificationResultService->addDuration($result, $startTime);
+                $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                return $this->verificationResultService->formatResponse($result);
             }
 
             // 3. Role-based email check
-            $roleCheck = $this->checkRoleBased($parts['account']);
+            $roleCheck = $this->emailParserService->checkRoleBased($parts['account']);
             $result['role'] = $roleCheck;
             $result['checks']['role'] = $roleCheck; // Update checks array
             if ($roleCheck) {
@@ -1110,50 +235,54 @@ class EmailVerificationService
             }
 
             // 3.9. Domain validity check (DNS resolution, redirect detection, availability)
-            $domainValidity = $this->checkDomainValidity($parts['domain']);
+            $domainValidity = $this->domainValidationService->checkDomainValidity($parts['domain']);
             if (!$domainValidity['valid']) {
                 $result['status'] = $domainValidity['status'] ?? 'invalid';
                 $result['error'] = $domainValidity['error'] ?? 'Domain does not exist or is not accessible';
                 $result['score'] = 0;
                 $result['domain_validity'] = false;
-                $this->addDuration($result, $startTime);
-                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $this->formatResponse($result);
+                $this->verificationResultService->addDuration($result, $startTime);
+                $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                return $this->verificationResultService->formatResponse($result);
             }
             $result['domain_validity'] = true;
             $result['checks']['domain_validity'] = true; // Update checks array
 
             // 4. MX check
-            $mxCheck = $this->checkMx($parts['domain']);
+            $mxCheck = $this->domainValidationService->checkMx($parts['domain']);
             $result['mx_record'] = $mxCheck;
             $result['checks']['mx_record'] = $mxCheck; // Update checks array
             if (!$mxCheck) {
                 $result['status'] = 'invalid';
-                $result['error'] = $this->getErrorMessages()['no_mx_records'];
+                $result['error'] = $this->verificationResultService->getErrorMessages()['no_mx_records'];
                 // Don't add disposable and role_bonus if no MX records (matches Go behavior)
                 // Go skriptas: syntax (20) + domain_exists (20) = 40 (ne 60)
                 $checksForScore = $result['checks'];
                 unset($checksForScore['disposable'], $checksForScore['role']); // Remove disposable and role from score calculation
-                $result['score'] = $this->calculateScore($checksForScore);
-                $this->addDuration($result, $startTime);
+                $result['score'] = $this->scoreCalculationService->calculateScore($checksForScore, [
+                    'email' => $email,
+                    'domain' => $parts['domain'],
+                    'mx_records' => [],
+                ]);
+                $this->verificationResultService->addDuration($result, $startTime);
                 // Determine state and result before saving
-                $stateAndResult = $this->determineStateAndResult($result);
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                 $result['state'] = $stateAndResult['state'];
                 $result['result'] = $stateAndResult['result'];
-                $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $this->formatResponse($result);
+                $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                return $this->verificationResultService->formatResponse($result);
             }
 
             // 4.5. Public provider check (before SMTP check)
-            $mxRecords = $this->getMxRecords($parts['domain']);
-            $publicProvider = $this->isPublicProvider($parts['domain'], $mxRecords);
-            
+            $mxRecords = $this->domainValidationService->getMxRecords($parts['domain']);
+            $publicProvider = $this->domainValidationService->isPublicProvider($parts['domain'], $mxRecords);
+
             // Set free flag if domain is a public provider (free email provider)
             $result['is_free'] = $publicProvider !== null;
             $result['free'] = $result['is_free']; // Keep for backward compatibility
             $result['checks']['free'] = $result['free']; // Add to checks for score calculation
             $result['checks']['is_free'] = $result['is_free']; // Also add is_free for compatibility
-            
+
             if ($publicProvider && ($publicProvider['skip_smtp'] ?? false)) {
                 // Skip SMTP check for public providers
                 // Public providers (Gmail, Yahoo, etc.) are catch-all servers
@@ -1166,23 +295,27 @@ class EmailVerificationService
                     $result['checks']['smtp'] = false; // Update checks array
                     $result['mailbox_full'] = false; // Not checked (public providers are assumed to have space)
                     $result['checks']['mailbox_full'] = false; // Add to checks for score calculation
-                    
+
                     // Calculate score with new system (without SMTP check)
                     // Public providers are catch-all, so they get base score without bonus
                     // Base score: syntax (20) + domain_validity (20) + mx_record (20) + disposable (10) + role_bonus (10) = 80
                     // Note: No bonus for catch-all servers since we can't verify if email actually exists
-                    $result['score'] = $this->calculateScore($result['checks']);
+                    $result['score'] = $this->scoreCalculationService->calculateScore($result['checks'], [
+                        'email' => $email,
+                        'domain' => $parts['domain'],
+                        'mx_records' => $mxRecords,
+                    ]);
                     // Catch-all servers don't get bonus - they're risky, not trusted
-                    
+
                     // Check Gravatar for catch-all emails (helps determine if email likely exists)
                     if (config('email-verification.enable_gravatar_check', true)) {
                         try {
                             $gravatarService = app(GravatarService::class);
                             $gravatar = $gravatarService->checkGravatar($email);
-                            
+
                             if ($gravatar['has_gravatar'] ?? false) {
                                 // Email has Gravatar - more likely to exist (active user)
-                                $weights = $this->getScoreWeights();
+                                $weights = $this->scoreCalculationService->getScoreWeights();
                                 $gravatarBonus = $weights['gravatar_bonus'] ?? 5;
                                 $result['score'] = min(100, max(0, $result['score'] + $gravatarBonus)); // Clamp to 0-100
                                 $result['gravatar'] = true;
@@ -1199,7 +332,7 @@ class EmailVerificationService
                             $result['gravatar'] = false;
                         }
                     }
-                    
+
                     // Check DMARC for catch-all emails (helps determine email confidence)
                     // If DMARC policy = "reject" → more likely email is real
                     // If DMARC policy = "quarantine" → somewhat likely email is real
@@ -1207,22 +340,22 @@ class EmailVerificationService
                         try {
                             $dmarcService = app(DmarcCheckService::class);
                             $dmarcResult = $dmarcService->checkDomain($parts['domain']);
-                            
+
                             if (!$dmarcResult['has_issue'] && isset($dmarcResult['details']['parsed'])) {
                                 $parsed = $dmarcResult['details']['parsed'];
                                 $dmarcPolicy = $parsed['p'] ?? null;
-                                
+
                                 // Store DMARC info
                                 $result['dmarc'] = [
                                     'policy' => $dmarcPolicy,
                                     'record' => $dmarcResult['details']['record'] ?? null,
                                     'parsed' => $parsed,
                                 ];
-                                
+
                                 // Add confidence boost based on DMARC policy
-                                $weights = $this->getScoreWeights();
+                                $weights = $this->scoreCalculationService->getScoreWeights();
                                 $dmarcBonus = 0;
-                                
+
                                 if ($dmarcPolicy === 'reject') {
                                     // DMARC reject policy = more likely email is real (strict security)
                                     $dmarcBonus = $weights['dmarc_reject_bonus'] ?? 10;
@@ -1245,7 +378,7 @@ class EmailVerificationService
                                         'domain' => $parts['domain'],
                                     ]);
                                 }
-                                
+
                                 if ($dmarcBonus > 0) {
                                     $result['score'] = min(100, max(0, $result['score'] + $dmarcBonus)); // Clamp to 0-100
                                     $result['dmarc_confidence_boost'] = $dmarcBonus;
@@ -1275,49 +408,41 @@ class EmailVerificationService
                             ];
                         }
                     }
-                    
-                    // Calculate Hunter.io style confidence score for catch-all emails
-                    // Hunter.io assigns confidence % based on publicly available data
-                    // Recommended filter: ~85-90% confidence for catch-all emails
-                    if (config('email-verification.enable_hunter_confidence', true)) {
-                        $hunterConfidence = $this->calculateHunterStyleConfidence($result['checks'], true, $result);
-                        $result['hunter_confidence'] = $hunterConfidence;
-                        Log::debug('Hunter.io style confidence calculated for public provider', [
-                            'email' => $email,
-                            'confidence' => $hunterConfidence,
-                        ]);
-                    }
-                    
+
                     $result['error'] = null; // Clear any errors
-                    $this->addDuration($result, $startTime);
+                    $this->verificationResultService->addDuration($result, $startTime);
                     // Determine state and result before saving
-                    $stateAndResult = $this->determineStateAndResult($result);
+                    $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                     $result['state'] = $stateAndResult['state'];
                     $result['result'] = $stateAndResult['result'];
-                    $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                    return $this->formatResponse($result);
+                    $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                    return $this->verificationResultService->formatResponse($result);
                 }
             }
 
             // Calculate score before SMTP check (for faster response if SMTP fails)
-            $result['score'] = $this->calculateScore($result['checks']);
+            $result['score'] = $this->scoreCalculationService->calculateScore($result['checks'], [
+                'email' => $email,
+                'domain' => $parts['domain'],
+                'mx_records' => $mxRecords,
+            ]);
 
             // 5. SMTP check (AfterShip method: catch-all check first, then specific email if not catch-all)
             // Only perform if enabled in config and rate limit allows
-            if ($this->isSmtpCheckEnabled()) {
+            if ($this->smtpVerificationService->isSmtpCheckEnabled()) {
                 try {
                     // Check rate limit before performing SMTP check
-                    if ($this->checkSmtpRateLimit($parts['domain'])) {
-                        $smtpResult = $this->checkSmtpWithDetails($email, $parts['domain']);
+                    if ($this->smtpVerificationService->checkSmtpRateLimit($parts['domain'])) {
+                        $smtpResult = $this->smtpVerificationService->checkSmtpWithDetails($email, $parts['domain']);
                         $smtpCheck = $smtpResult['valid'];
                         $isCatchAll = $smtpResult['catch_all'] ?? false;
-                        
+
                         $result['smtp'] = $smtpCheck;
                         $result['checks']['smtp'] = $smtpCheck; // Update checks array
                         $result['mailbox_full'] = $smtpResult['mailbox_full'] ?? false;
                         $result['checks']['mailbox_full'] = $result['mailbox_full']; // Add to checks for score calculation
                         $result['catch_all'] = $isCatchAll; // Store catch-all status
-                        
+
                         // Store VRFY/EXPN verification method and confidence if available
                         if (isset($smtpResult['verification_method'])) {
                             $result['verification_method'] = $smtpResult['verification_method'];
@@ -1325,20 +450,20 @@ class EmailVerificationService
                         if (isset($smtpResult['confidence'])) {
                             $result['smtp_confidence'] = $smtpResult['confidence'];
                         }
-                        
+
                         // If catch-all detected, handle it (AfterShip method)
                         if ($isCatchAll) {
                             $result['status'] = config('email-verification.catch_all_status', 'catch_all');
-                            
+
                             // Check Gravatar for catch-all emails (helps determine if email likely exists)
                             if (config('email-verification.enable_gravatar_check', true)) {
                                 try {
                                     $gravatarService = app(GravatarService::class);
                                     $gravatar = $gravatarService->checkGravatar($email);
-                                    
+
                                     if ($gravatar['has_gravatar'] ?? false) {
                                         // Email has Gravatar - more likely to exist (active user)
-                                        $weights = $this->getScoreWeights();
+                                        $weights = $this->scoreCalculationService->getScoreWeights();
                                         $gravatarBonus = $weights['gravatar_bonus'] ?? 5;
                                         $result['score'] = min(100, max(0, $result['score'] + $gravatarBonus)); // Clamp to 0-100
                                         $result['gravatar'] = true;
@@ -1355,7 +480,7 @@ class EmailVerificationService
                                     $result['gravatar'] = false;
                                 }
                             }
-                            
+
                             // Check DMARC for catch-all emails (helps determine email confidence)
                             // If DMARC policy = "reject" → more likely email is real
                             // If DMARC policy = "quarantine" → somewhat likely email is real
@@ -1363,22 +488,22 @@ class EmailVerificationService
                                 try {
                                     $dmarcService = app(DmarcCheckService::class);
                                     $dmarcResult = $dmarcService->checkDomain($parts['domain']);
-                                    
+
                                     if (!$dmarcResult['has_issue'] && isset($dmarcResult['details']['parsed'])) {
                                         $parsed = $dmarcResult['details']['parsed'];
                                         $dmarcPolicy = $parsed['p'] ?? null;
-                                        
+
                                         // Store DMARC info
                                         $result['dmarc'] = [
                                             'policy' => $dmarcPolicy,
                                             'record' => $dmarcResult['details']['record'] ?? null,
                                             'parsed' => $parsed,
                                         ];
-                                        
+
                                         // Add confidence boost based on DMARC policy
-                                        $weights = $this->getScoreWeights();
+                                        $weights = $this->scoreCalculationService->getScoreWeights();
                                         $dmarcBonus = 0;
-                                        
+
                                         if ($dmarcPolicy === 'reject') {
                                             // DMARC reject policy = more likely email is real (strict security)
                                             $dmarcBonus = $weights['dmarc_reject_bonus'] ?? 10;
@@ -1401,7 +526,7 @@ class EmailVerificationService
                                                 'domain' => $parts['domain'],
                                             ]);
                                         }
-                                        
+
                                         if ($dmarcBonus > 0) {
                                             $result['score'] = min(100, max(0, $result['score'] + $dmarcBonus)); // Clamp to 0-100
                                             $result['dmarc_confidence_boost'] = $dmarcBonus;
@@ -1431,35 +556,33 @@ class EmailVerificationService
                                     ];
                                 }
                             }
-                            
+
                             // Recalculate score after Gravatar and DMARC checks (if applicable)
-                            $result['score'] = $this->calculateScore($result['checks']);
-                            
-                            // Calculate Hunter.io style confidence score for catch-all emails
-                            // Hunter.io assigns confidence % based on publicly available data
-                            // Recommended filter: ~85-90% confidence for catch-all emails
-                            if (config('email-verification.enable_hunter_confidence', true)) {
-                                $hunterConfidence = $this->calculateHunterStyleConfidence($result['checks'], true, $result);
-                                $result['hunter_confidence'] = $hunterConfidence;
-                                Log::debug('Hunter.io style confidence calculated', [
-                                    'email' => $email,
-                                    'confidence' => $hunterConfidence,
-                                ]);
-                            }
-                            
+                            $result['score'] = $this->scoreCalculationService->calculateScore($result['checks'], [
+                                'email' => $email,
+                                'domain' => $parts['domain'],
+                                'mx_records' => $mxRecords,
+                                'verification_method' => $result['verification_method'] ?? null,
+                            ]);
+
                             $result['error'] = 'Catch-all server detected';
-                            $this->addDuration($result, $startTime);
+                            $this->verificationResultService->addDuration($result, $startTime);
                             // Determine state and result before saving
-                            $stateAndResult = $this->determineStateAndResult($result);
+                            $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                             $result['state'] = $stateAndResult['state'];
                             $result['result'] = $stateAndResult['result'];
-                            $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                            return $this->formatResponse($result);
+                            $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                            return $this->verificationResultService->formatResponse($result);
                         }
-                        
+
                         // Not catch-all, so SMTP check result is valid
                         // Recalculate score after SMTP check
-                        $result['score'] = $this->calculateScore($result['checks']);
+                        $result['score'] = $this->scoreCalculationService->calculateScore($result['checks'], [
+                            'email' => $email,
+                            'domain' => $parts['domain'],
+                            'mx_records' => $mxRecords,
+                            'verification_method' => $result['verification_method'] ?? null,
+                        ]);
                     } else {
                         // Rate limit exceeded, skip SMTP check
                         $result['smtp'] = false;
@@ -1493,30 +616,33 @@ class EmailVerificationService
             }
 
             // Determine final status based on config rules
-            $statusRules = $this->getStatusRules();
+            $statusRules = $this->verificationResultService->getStatusRules();
             if ($result['smtp']) {
                 // SMTP check passed = definitely valid
                 $result['status'] = $statusRules['smtp_valid'];
+            } elseif ($result['catch_all'] ?? false) {
+                // Catch-all server detected = catch_all status
+                $result['status'] = config('email-verification.catch_all_status', 'catch_all');
             } elseif ($result['score'] >= ($statusRules['min_score_for_valid'] ?? 85)) {
                 // High score without SMTP (likely public provider or known good domain)
                 $result['status'] = 'valid';
             } elseif ($result['score'] >= ($statusRules['min_score_for_catch_all'] ?? 70)) {
-                // Medium score = catch-all or risky
-                $result['status'] = $result['role'] 
+                // Medium score = risky (not catch-all, just uncertain)
+                $result['status'] = $result['role']
                     ? ($statusRules['role_emails_status'] ?? 'risky')
-                    : ($statusRules['non_role_emails_status'] ?? 'catch_all');
+                    : 'risky'; // Changed from 'catch_all' to 'risky' - only use catch_all if actually detected
             } else {
                 // Low score = invalid
                 $result['status'] = $statusRules['default_invalid'] ?? 'invalid';
             }
 
             // Determine state and result before saving
-            $stateAndResult = $this->determineStateAndResult($result);
+            $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
             $result['state'] = $stateAndResult['state'];
             $result['result'] = $stateAndResult['result'];
-            
+
             // Save to database
-            $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+            $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
 
         } catch (\Exception $e) {
             Log::error('Email verification failed', [
@@ -1526,17 +652,17 @@ class EmailVerificationService
 
             $result['status'] = 'unknown';
             $result['error'] = $e->getMessage();
-            
+
             // Determine state and result even on error
-            $stateAndResult = $this->determineStateAndResult($result);
+            $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
             $result['state'] = $stateAndResult['state'];
             $result['result'] = $stateAndResult['result'];
-            
+
             // Try to save even on error
             try {
-                $parts = $this->parseEmail($email);
+                $parts = $this->emailParserService->parseEmail($email);
                 if ($parts) {
-                    $this->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                    $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 }
             } catch (\Exception $saveException) {
                 Log::error('Failed to save verification record', [
@@ -1547,1801 +673,44 @@ class EmailVerificationService
         }
 
         // Calculate duration
-        $this->addDuration($result, $startTime);
-        
+        $this->verificationResultService->addDuration($result, $startTime);
+
         // Record metrics
-        $this->recordMetrics($result, $startTime);
-        
+        $this->verificationResultService->recordMetrics($result, $startTime);
+
         // Format response before returning
-        return $this->formatResponse($result);
+        return $this->verificationResultService->formatResponse($result);
     }
 
     /**
      * Format verification response to ensure consistent structure
      * Checks are flattened into main response, not in separate object
-     * 
+     *
      * @param array $result
      * @return array
      */
-    private function formatResponse(array $result): array
-    {
-        $checks = $result['checks'] ?? [];
-        
-        // Flatten checks into main response
-        $formatted = [
-            'email' => $result['email'] ?? '',
-            'state' => $result['state'] ?? 'unknown',
-            'result' => $result['result'] ?? null,
-            'account' => $result['account'] ?? null,
-            'domain' => $result['domain'] ?? null,
-            'score' => $result['score'] ?? 0,
-            'email_score' => $result['score'] ?? 0, // Alias for backward compatibility
-            'duration' => $result['duration'] ?? null,
-            
-            // Checks flattened into main response
-            // Note: blacklist, isp_esp, government_tld are used in verification process
-            // but not returned in response as they are internal checks
-            'syntax' => $checks['syntax'] ?? false,
-            'domain_validity' => $checks['domain_validity'] ?? false,
-            'mx_record' => $checks['mx_record'] ?? false,
-            'smtp' => $checks['smtp'] ?? false,
-            'disposable' => $checks['disposable'] ?? false,
-            'role' => $checks['role'] ?? false,
-            'no_reply' => $checks['no_reply'] ?? false,
-            'typo_domain' => $checks['typo_domain'] ?? false,
-            
-            // Alias and typo suggestions
-            'alias' => $result['aliasOf'] ?? $result['alias_of'] ?? null,
-            'did_you_mean' => $result['did_you_mean'] ?? $result['typoSuggestion'] ?? $result['typo_suggestion'] ?? null,
-            'free' => $result['free'] ?? $result['is_free'] ?? false,
-            'mailbox_full' => $result['mailbox_full'] ?? false,
-            'catch_all' => $result['catch_all'] ?? false,
-        ];
-        
-        // Add Gravatar fields if present (for catch-all emails)
-        if (isset($result['gravatar'])) {
-            $formatted['gravatar'] = $result['gravatar'];
-            if (isset($result['gravatar_url'])) {
-                $formatted['gravatar_url'] = $result['gravatar_url'];
-            }
-        }
-        
-        // Add DMARC fields if present (for catch-all emails)
-        if (isset($result['dmarc'])) {
-            $formatted['dmarc'] = $result['dmarc'];
-            if (isset($result['dmarc_confidence_boost'])) {
-                $formatted['dmarc_confidence_boost'] = $result['dmarc_confidence_boost'];
-            }
-        }
-        
-        // Add VRFY/EXPN verification method if present
-        if (isset($result['verification_method'])) {
-            $formatted['verification_method'] = $result['verification_method'];
-        }
-        if (isset($result['smtp_confidence'])) {
-            $formatted['smtp_confidence'] = $result['smtp_confidence'];
-        }
-        
-        // Add Hunter.io style confidence score if present
-        if (isset($result['hunter_confidence'])) {
-            $formatted['hunter_confidence'] = $result['hunter_confidence'];
-        }
-        
-        // Add checks array for compatibility (if needed by frontend)
-        if (isset($result['checks'])) {
-            $formatted['checks'] = $result['checks'];
-        }
 
-        // Only include error if present
-        if (!empty($result['error'])) {
-            $formatted['error'] = $result['error'];
-        }
 
-        // Add optional AI fields if present
-        if (isset($result['ai_confidence'])) {
-            $formatted['ai_confidence'] = $result['ai_confidence'];
-        }
-        if (isset($result['ai_insights'])) {
-            $formatted['ai_insights'] = $result['ai_insights'];
-        }
 
-        return $formatted;
-    }
-
-    /**
-     * Record metrics for verification
-     */
-    private function recordMetrics(array $result, float $startTime): void
-    {
-        try {
-            $metrics = app(MetricsService::class);
-            $duration = $result['duration'] ?? (microtime(true) - $startTime);
-            $status = $result['status'] ?? 'unknown';
-            
-            $metrics->recordVerification($status, $duration);
-            
-            if (isset($result['score'])) {
-                $metrics->recordScore($result['score'], $status);
-            }
-            
-            if (isset($result['smtp']) && $result['smtp'] !== null) {
-                $smtpDuration = $result['smtp_duration'] ?? null;
-                $metrics->recordSmtpCheck($result['smtp'], $smtpDuration);
-            }
-        } catch (\Exception $e) {
-            // Don't fail verification if metrics recording fails
-            Log::debug('Failed to record metrics', ['error' => $e->getMessage()]);
-        }
-    }
-    
-    private function saveVerification(array $result, ?int $userId, ?int $teamId, ?int $tokenId, array $parts, ?int $bulkJobId = null, ?string $source = null): void
-    {
-        try {
-            $verification = EmailVerification::create([
-                'user_id' => $userId,
-                'team_id' => $teamId,
-                'api_key_id' => $tokenId, // Store Sanctum token ID for reference
-                'bulk_verification_job_id' => $bulkJobId,
-                'source' => $source,
-                'email' => $result['email'],
-                'account' => $parts['account'] ?? null,
-                'domain' => $parts['domain'] ?? null,
-                'state' => $result['state'] ?? 'unknown',
-                'result' => $result['result'] ?? null,
-                'syntax' => $result['syntax'] ?? false,
-                'mx_record' => $result['mx_record'] ?? false,
-                'smtp' => $result['smtp'] ?? false,
-                'disposable' => $result['disposable'] ?? false,
-                'role' => $result['role'] ?? false,
-                'no_reply' => $result['no_reply'] ?? false,
-                'typo_domain' => $result['typo_domain'] ?? false,
-                'mailbox_full' => $result['mailbox_full'] ?? false,
-                'is_free' => $result['is_free'] ?? $result['free'] ?? false,
-                'blacklist' => $result['blacklist'] ?? false,
-                'domain_validity' => $result['domain_validity'] ?? false,
-                'isp_esp' => $result['isp_esp'] ?? false,
-                'government_tld' => $result['government_tld'] ?? false,
-                'gravatar' => $result['gravatar'] ?? false,
-                'ai_analysis' => $result['ai_analysis'] ?? false,
-                'ai_insights' => $result['ai_insights'] ?? null,
-                'ai_confidence' => $result['ai_confidence'] ?? null,
-                'ai_risk_factors' => $result['ai_risk_factors'] ?? null,
-                'did_you_mean' => $result['did_you_mean'] ?? $result['typo_suggestion'] ?? $result['typoSuggestion'] ?? null,
-                'alias_of' => $result['alias_of'] ?? $result['aliasOf'] ?? null,
-                'email_score' => $result['score'] ?? null, // Traditional email verification score (MX, blacklist, SMTP, etc.)
-                'score' => null, // Will be calculated by AI service if AI is used (email_score + ai_confidence), otherwise equals email_score
-                'duration' => $result['duration'] ?? null, // Verification duration in seconds (rounded to 2 decimal places)
-                'verified_at' => now(),
-            ]);
-            
-            // Only log in debug mode to reduce log verbosity
-            if (config('app.debug')) {
-                Log::debug('Email verification saved', [
-                    'id' => $verification->id,
-                    'email' => $result['email'],
-                    'state' => $result['state'] ?? 'unknown',
-                ]);
-            }
-        } catch (\Exception $e) {
-            Log::error('Failed to save email verification', [
-                'email' => $result['email'] ?? 'unknown',
-                'user_id' => $userId,
-                'team_id' => $teamId,
-                'error' => $e->getMessage(),
-                'trace' => substr($e->getTraceAsString(), 0, 500), // First 500 chars of trace
-            ]);
-            // Don't throw - we still want to return the result
-        }
-    }
-
-    private function parseEmail(string $email): ?array
-    {
-        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            return null;
-        }
-
-        // Use limit=2 to handle emails with @ in local part (though filter_var should prevent this)
-        $parts = explode('@', $email, 2);
-        if (count($parts) !== 2) {
-            return null;
-        }
-
-        return [
-            'account' => strtolower($parts[0]),
-            'domain' => strtolower($parts[1]),
-        ];
-    }
-    
-    private function checkSyntax(string $email): bool
-    {
-        return filter_var($email, FILTER_VALIDATE_EMAIL) !== false;
-    }
-
-    private function checkDisposable(string $domain): bool
-    {
-        try {
-            return app(DisposableDomains::class)->isDisposable($domain);
-        } catch (\Exception $e) {
-            Log::warning('Disposable email check failed', ['domain' => $domain, 'error' => $e->getMessage()]);
-            return false;
-        }
-    }
-
-    private function checkRoleBased(string $account): bool
-    {
-        return in_array(strtolower($account), $this->getRoleEmails(), true);
-    }
-
-    /**
-     * Detect email alias and return canonical email address
-     * Supports Gmail, Yahoo, Outlook/Hotmail aliases
-     * 
-     * @param string $email
-     * @return string|null Canonical email address or null if not an alias
-     */
-    private function detectAlias(string $email): ?string
-    {
-        $parts = $this->parseEmail($email);
-        if (!$parts) {
-            return null;
-        }
-        
-        $domain = strtolower($parts['domain']);
-        $localPart = $parts['account'];
-        
-        // Gmail/GoogleMail alias detection
-        if (in_array($domain, ['gmail.com', 'googlemail.com'], true)) {
-            // Gmail aliases: dots are ignored, plus addressing is supported
-            // user.name+test@gmail.com -> username@gmail.com
-            $canonical = $localPart;
-            
-            // Remove everything after plus sign
-            if (($plusPos = strpos($canonical, '+')) !== false) {
-                $canonical = substr($canonical, 0, $plusPos);
-            }
-            
-            // Remove all dots
-            $canonical = str_replace('.', '', $canonical);
-            
-            // Always use gmail.com as canonical domain
-            return $canonical . '@gmail.com';
-        }
-        
-        // Yahoo alias detection (format: username-alias@yahoo.com)
-        if (str_contains($domain, 'yahoo.') || in_array($domain, ['ymail.com', 'rocketmail.com'], true)) {
-            // Yahoo uses hyphen for aliases: username-alias@yahoo.com -> username@yahoo.com
-            if (preg_match('/^([^-]+)-(.+)$/', $localPart, $matches)) {
-                // Extract base email (before hyphen)
-                $baseEmail = $matches[1];
-                // Use original domain (yahoo.com, yahoo.co.uk, etc.)
-                return $baseEmail . '@' . $domain;
-            }
-        }
-        
-        // Outlook/Hotmail/Live alias detection
-        $outlookDomains = [
-            'outlook.com', 'outlook.fr', 'outlook.de', 'outlook.es', 'outlook.it',
-            'outlook.co.uk', 'outlook.jp', 'outlook.in', 'outlook.com.au',
-            'hotmail.com', 'hotmail.fr', 'hotmail.de', 'hotmail.es', 'hotmail.it',
-            'hotmail.co.uk', 'hotmail.jp', 'hotmail.in', 'hotmail.com.au',
-            'live.com', 'live.fr', 'live.de', 'live.co.uk', 'live.jp',
-            'msn.com', 'passport.com', 'passport.net',
-        ];
-        
-        if (in_array($domain, $outlookDomains, true)) {
-            // Outlook uses plus addressing: username+test@outlook.com -> username@outlook.com
-            if (($plusPos = strpos($localPart, '+')) !== false) {
-                $canonical = substr($localPart, 0, $plusPos);
-                return $canonical . '@' . $domain;
-            }
-        }
-        
-        return null;
-    }
 
     /**
      * Get typo suggestions for email address
      * Returns corrected email if typo is detected
-     * 
+     * Wrapper method for backward compatibility
+     *
      * @param string $email
      * @return string|null Corrected email address or null if no typo detected
      */
     public function getTypoSuggestions(string $email): ?string
     {
-        $parts = $this->parseEmail($email);
-        if (!$parts) {
-            return null;
-        }
-        
-        $domain = $parts['domain'];
-        $localPart = $parts['account'];
-        
-        // First check if we already have typo correction from existing method
-        $typoCorrection = $this->getTypoCorrection($domain);
-        if ($typoCorrection) {
-            return $localPart . '@' . $typoCorrection;
-        }
-        
-        // Common domain typo corrections (static list for fast lookup)
-        $typoCorrections = [
-            'gmial.com' => 'gmail.com',
-            'gmal.com' => 'gmail.com',
-            'gamil.com' => 'gmail.com',
-            'gmai.com' => 'gmail.com',
-            'gmail.co' => 'gmail.com',
-            'gmail.cm' => 'gmail.com',
-            'gmail.om' => 'gmail.com',
-            'gmail.con' => 'gmail.com',
-            'yaho.com' => 'yahoo.com',
-            'yahooo.com' => 'yahoo.com',
-            'yahoo.co' => 'yahoo.com',
-            'yahoo.cm' => 'yahoo.com',
-            'hotmai.com' => 'hotmail.com',
-            'hotmal.com' => 'hotmail.com',
-            'hotmail.co' => 'hotmail.com',
-            'hotmail.cm' => 'hotmail.com',
-            'otmail.com' => 'hotmail.com',
-            'outlook.co' => 'outlook.com',
-            'outlook.cm' => 'outlook.com',
-            'outlok.com' => 'outlook.com',
-        ];
-        
-        $domainLower = strtolower($domain);
-        if (isset($typoCorrections[$domainLower])) {
-            return $localPart . '@' . $typoCorrections[$domainLower];
-        }
-        
-        return null;
+        return $this->riskAssessmentService->getTypoSuggestions($email);
     }
 
-    /**
-     * Check domain validity: DNS resolution, redirect detection, availability
-     */
-    private function checkDomainValidity(string $domain): array
-    {
-        if (!config('email-verification.enable_domain_validity_check', true)) {
-            return ['valid' => true];
-        }
-        
-        $cacheKey = "domain_validity_{$domain}";
-        $ttl = config('email-verification.domain_validity_cache_ttl', 3600);
-        
-        return Cache::remember($cacheKey, $ttl, function () use ($domain) {
-            // Set DNS timeout to prevent hanging
-            $originalTimeout = ini_get('default_socket_timeout');
-            ini_set('default_socket_timeout', 3); // 3 seconds max for DNS
-            
-            try {
-                // 1. DNS Resolution Check (A record)
-                $resolvedIp = @gethostbyname($domain);
-            if ($resolvedIp === $domain || !filter_var($resolvedIp, FILTER_VALIDATE_IP)) {
-                // Domain does not resolve to IP
-                return [
-                    'valid' => false,
-                    'status' => 'invalid',
-                    'error' => 'Domain does not exist (DNS resolution failed)',
-                    'reason' => 'dns_resolution_failed',
-                ];
-            }
-            
-            // 2. Check if domain has A record (not just CNAME)
-            if (function_exists('dns_get_record')) {
-                $dnsRecords = @dns_get_record($domain, DNS_A | DNS_AAAA);
-                if (empty($dnsRecords)) {
-                    // No A or AAAA records found
-                    return [
-                        'valid' => false,
-                        'status' => 'invalid',
-                        'error' => 'Domain has no A or AAAA records',
-                        'reason' => 'no_a_record',
-                    ];
-                }
-            }
-            
-            // 3. HTTP Redirect Detection (optional, can be disabled for performance)
-            if (config('email-verification.check_domain_redirect', false)) {
-                $redirectCheck = $this->checkDomainRedirect($domain);
-                if ($redirectCheck['is_redirect']) {
-                    return [
-                        'valid' => false,
-                        'status' => 'risky',
-                        'error' => 'Domain redirects to another domain (possible spam trap)',
-                        'reason' => 'domain_redirect',
-                        'redirect_to' => $redirectCheck['redirect_to'] ?? null,
-                    ];
-                }
-            }
-            
-            // 4. Domain Availability Check (HTTP response)
-            if (config('email-verification.check_domain_availability', false)) {
-                $availabilityCheck = $this->checkDomainAvailability($domain);
-                if (!$availabilityCheck['available']) {
-                    return [
-                        'valid' => false,
-                        'status' => 'invalid',
-                        'error' => 'Domain is not accessible or does not respond',
-                        'reason' => 'domain_not_available',
-                    ];
-                }
-            }
-            
-                return ['valid' => true];
-            } finally {
-                // Restore original timeout
-                ini_set('default_socket_timeout', $originalTimeout);
-            }
-        });
-    }
-    
-    /**
-     * Check if domain redirects (HTTP redirect detection)
-     */
-    private function checkDomainRedirect(string $domain): array
-    {
-        $timeout = config('email-verification.domain_check_timeout', 3);
-        
-        try {
-            $url = "http://{$domain}";
-            $context = stream_context_create([
-                'http' => [
-                    'method' => 'HEAD',
-                    'timeout' => $timeout,
-                    'follow_location' => false, // Don't follow redirects automatically
-                    'max_redirects' => 0,
-                    'user_agent' => 'Mozilla/5.0 (compatible; EmailVerifier/1.0)',
-                ],
-            ]);
-            
-            $headers = @get_headers($url, 1, $context);
-            
-            if ($headers === false) {
-                return ['is_redirect' => false];
-            }
-            
-            // Check for redirect status codes (3xx)
-            $statusLine = $headers[0] ?? '';
-            if (preg_match('/HTTP\/\d\.\d\s+3\d{2}/', $statusLine)) {
-                // Extract redirect location
-                $location = $headers['Location'] ?? $headers['location'] ?? null;
-                if (is_array($location)) {
-                    $location = $location[0] ?? null;
-                }
-                
-                return [
-                    'is_redirect' => true,
-                    'redirect_to' => $location,
-                    'status_code' => (int)substr($statusLine, 9, 3),
-                ];
-            }
-            
-            return ['is_redirect' => false];
-        } catch (\Exception $e) {
-            // If check fails, don't block - just return no redirect
-            Log::debug('Domain redirect check failed', [
-                'domain' => $domain,
-                'error' => $e->getMessage(),
-            ]);
-            return ['is_redirect' => false];
-        }
-    }
-    
-    /**
-     * Check if domain is available/accessible (HTTP response check)
-     */
-    private function checkDomainAvailability(string $domain): array
-    {
-        $timeout = config('email-verification.domain_check_timeout', 3);
-        
-        try {
-            $url = "http://{$domain}";
-            $context = stream_context_create([
-                'http' => [
-                    'method' => 'HEAD',
-                    'timeout' => $timeout,
-                    'user_agent' => 'Mozilla/5.0 (compatible; EmailVerifier/1.0)',
-                ],
-            ]);
-            
-            $headers = @get_headers($url, 0, $context);
-            
-            if ($headers === false) {
-                // Domain doesn't respond to HTTP - might still be valid for email
-                // Don't block based on HTTP availability alone
-                return ['available' => true];
-            }
-            
-            // Check for successful response (2xx) or redirect (3xx)
-            $statusLine = $headers[0] ?? '';
-            if (preg_match('/HTTP\/\d\.\d\s+[23]\d{2}/', $statusLine)) {
-                return ['available' => true];
-            }
-            
-            // 4xx or 5xx - domain exists but has issues
-            // Still consider available (might be email-only domain)
-            return ['available' => true];
-        } catch (\Exception $e) {
-            // If check fails, don't block - email domains might not have HTTP
-            Log::debug('Domain availability check failed', [
-                'domain' => $domain,
-                'error' => $e->getMessage(),
-            ]);
-            return ['available' => true];
-        }
-    }
-
-    private function checkMx(string $domain): bool
-    {
-        $cacheKey = "mx_check_{$domain}";
-        $ttl = $this->getMxCacheTtl();
-        
-        return Cache::remember($cacheKey, $ttl, function () use ($domain) {
-            // Set DNS timeout to prevent hanging
-            $originalTimeout = ini_get('default_socket_timeout');
-            ini_set('default_socket_timeout', 3); // 3 seconds max for DNS
-            
-            try {
-                $mxRecords = [];
-                $result = @getmxrr($domain, $mxRecords);
-                
-                if (!$result && function_exists('dns_get_record')) {
-                    $dnsRecords = @dns_get_record($domain, DNS_MX);
-                    $result = !empty($dnsRecords);
-                }
-                
-                return $result;
-            } finally {
-                // Restore original timeout
-                ini_set('default_socket_timeout', $originalTimeout);
-            }
-        });
-    }
-
-    private function checkSmtp(string $email, string $domain): bool
-    {
-        return $this->checkSmtpWithDetails($email, $domain)['valid'];
-    }
-    
-    /**
-     * Check SMTP with detailed response information (AfterShip method)
-     * Returns array with 'valid', 'mailbox_full', and 'catch_all' flags
-     * 
-     * AfterShip logic:
-     * 1. First check catch-all with random email (if enabled)
-     * 2. If catch-all = true, don't check specific email (return early)
-     * 3. If catch-all = false, check specific email
-     */
-    private function checkSmtpWithDetails(string $email, string $domain): array
-    {
-        // Get MX records (with caching)
-        $mxRecords = $this->getMxRecords($domain);
-        
-        if (empty($mxRecords)) {
-            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-        }
-
-        // Filter out skipped MX servers
-        $mxRecordsToTry = [];
-        foreach ($mxRecords as $mx) {
-            $host = $mx['host'];
-            
-            // Skip if MX server is in skip list
-            if ($this->shouldSkipMxServer($host)) {
-                Log::debug('Skipping MX server (in skip list)', ['host' => $host]);
-                continue;
-            }
-            
-            $mxRecordsToTry[] = $mx;
-        }
-        
-        if (empty($mxRecordsToTry)) {
-            Log::info('All MX servers are in skip list', ['domain' => $domain]);
-            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-        }
-
-        // Try MX records concurrently (up to 3 to avoid long delays)
-        $maxMxToTry = 3;
-        $mxRecordsToTry = array_slice($mxRecordsToTry, 0, $maxMxToTry);
-        
-        // Get first available MX server connection (concurrent)
-        $mxConnection = $this->getConcurrentMxConnection($mxRecordsToTry);
-        if ($mxConnection === null) {
-            // Fallback to sequential if concurrent failed
-            return $this->performSequentialSmtpCheck($mxRecordsToTry, $email);
-        }
-        
-        // Use the connected MX server for SMTP check
-        $host = $mxConnection['host'];
-        $socket = $mxConnection['socket'];
-        
-        try {
-            // AfterShip method: First check catch-all (if enabled)
-            $catchAllEnabled = config('email-verification.enable_catch_all_detection', false);
-            $shouldSkipCatchAll = $this->shouldSkipCatchAllCheck($domain);
-            
-            // Default: assume catch-all = true (like AfterShip)
-            $isCatchAll = true;
-            
-            if ($catchAllEnabled && !$shouldSkipCatchAll) {
-                // Check if domain is public provider (they are always catch-all, skip test)
-                $publicProvider = $this->isPublicProvider($domain, $mxRecords);
-                
-                if (!$publicProvider) {
-                    // Test catch-all with random email (AfterShip method)
-                    // First, do SMTP handshake (greeting, EHLO, MAIL FROM)
-                    $handshakeResult = $this->performSmtpHandshake($socket, $host);
-                    if (!$handshakeResult['success']) {
-                        // Handshake failed, add to skip list if auto-add enabled, then close socket and return
-                        $this->addMxToSkipList($host, 'SMTP handshake failed');
-                        @fwrite($socket, "QUIT\r\n");
-                        @fclose($socket);
-                        return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-                    }
-                    
-                    // Try VRFY/EXPN commands first (if enabled)
-                    // These can verify email existence even on catch-all servers
-                    $vrfyResult = null;
-                    if (config('email-verification.enable_vrfy_check', true)) {
-                        // Try VRFY first (more commonly supported)
-                        $vrfyResult = $this->tryVrfyCommand($socket, $host, $email);
-                        
-                        // If VRFY worked, we have definitive answer - no need for catch-all check
-                        if ($vrfyResult !== null) {
-                            @fwrite($socket, "QUIT\r\n");
-                            @fclose($socket);
-                            
-                            Log::info('Email verified using VRFY command', [
-                                'email' => $email,
-                                'domain' => $domain,
-                                'valid' => $vrfyResult['valid'],
-                                'confidence' => $vrfyResult['confidence'] ?? 95,
-                            ]);
-                            
-                            return [
-                                'valid' => $vrfyResult['valid'],
-                                'mailbox_full' => false,
-                                'catch_all' => false, // VRFY bypasses catch-all
-                                'verification_method' => $vrfyResult['method'] ?? 'vrfy',
-                                'confidence' => $vrfyResult['confidence'] ?? 95,
-                            ];
-                        }
-                        
-                        // Try EXPN if VRFY didn't work
-                        $expnResult = $this->tryExpnCommand($socket, $host, $email);
-                        if ($expnResult !== null) {
-                            @fwrite($socket, "QUIT\r\n");
-                            @fclose($socket);
-                            
-                            Log::info('Email verified using EXPN command', [
-                                'email' => $email,
-                                'domain' => $domain,
-                                'valid' => $expnResult['valid'],
-                                'confidence' => $expnResult['confidence'] ?? 90,
-                            ]);
-                            
-                            return [
-                                'valid' => $expnResult['valid'],
-                                'mailbox_full' => false,
-                                'catch_all' => false, // EXPN bypasses catch-all
-                                'verification_method' => $expnResult['method'] ?? 'expn',
-                                'confidence' => $expnResult['confidence'] ?? 90,
-                            ];
-                        }
-                    }
-                    
-                    // VRFY/EXPN didn't work, proceed with catch-all test (AfterShip method)
-                    // Now test catch-all with random email
-                    $randomEmail = $this->generateRandomEmail($domain);
-                    $catchAllResult = $this->performRcptToOnly($socket, $host, $randomEmail);
-                    
-                    // If random email is rejected (550 5.1.1), it's NOT catch-all
-                    // If random email is accepted, it IS catch-all
-                    if ($catchAllResult['rejected'] && $catchAllResult['code'] === 550) {
-                        $isCatchAll = false; // Server rejected random email = not catch-all
-                    } else {
-                        $isCatchAll = true; // Server accepted random email = catch-all
-                    }
-                    
-                    Log::debug('Catch-all check result', [
-                        'domain' => $domain,
-                        'random_email' => $randomEmail,
-                        'is_catch_all' => $isCatchAll,
-                        'response_code' => $catchAllResult['code'] ?? null,
-                        'vrfy_supported' => $vrfyResult === null ? 'not_supported' : 'supported',
-                    ]);
-                } else {
-                    // Public provider = always catch-all, but we skip the test
-                    $isCatchAll = true;
-                }
-            }
-            
-            // If catch-all = true, don't check specific email (AfterShip optimization)
-            if ($isCatchAll) {
-                @fwrite($socket, "QUIT\r\n");
-                @fclose($socket);
-                
-                return [
-                    'valid' => false, // Can't verify if specific email exists
-                    'mailbox_full' => false,
-                    'catch_all' => true,
-                ];
-            }
-            
-            // Catch-all = false, so check specific email
-            // Socket already has handshake done, just do RCPT TO
-            $result = $this->performRcptToOnly($socket, $host, $email);
-            
-            @fwrite($socket, "QUIT\r\n");
-            @fclose($socket);
-            
-            return [
-                'valid' => $result['valid'] ?? false,
-                'mailbox_full' => $result['mailbox_full'] ?? false,
-                'catch_all' => false,
-            ];
-            
-        } catch (\Exception $e) {
-            @fclose($socket);
-            Log::warning('SMTP check failed', [
-                'email' => $email,
-                'domain' => $domain,
-                'error' => $e->getMessage(),
-            ]);
-            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-        }
-    }
-    
-    /**
-     * Get concurrent MX connection (AfterShip method)
-     * Attempts to connect to all MX servers simultaneously and returns first successful connection
-     * 
-     * Note: If mx_skip_auto_add is enabled, failed connections are NOT added to skip list here,
-     * because we want to try all MX servers first. Skip list is only updated after handshake fails
-     * or in sequential fallback.
-     * 
-     * @param array $mxRecords Array of MX records to try (already filtered by skip list)
-     * @return array|null Array with 'host' and 'socket' keys, or null if all failed
-     */
-    private function getConcurrentMxConnection(array $mxRecords): ?array
-    {
-        if (empty($mxRecords)) {
-            return null;
-        }
-        
-        $connectTimeout = $this->getSmtpConnectTimeout();
-        
-        // Try to connect to all MX servers with quick timeout, use first that succeeds
-        // Note: PHP doesn't have true concurrency like Go, but we can try connections quickly
-        // Note: We don't add to skip list here if connection fails, because:
-        // 1. Connection failure might be temporary (network issue, timeout too short)
-        // 2. Skip list is updated after handshake fails (more reliable indicator of problematic server)
-        // 3. Sequential fallback will handle skip list updates for persistent failures
-        foreach ($mxRecords as $mx) {
-            $host = $mx['host'];
-            
-            // Quick connection attempt
-            $socket = @fsockopen($host, 25, $errno, $errstr, $connectTimeout);
-            
-            if ($socket !== false) {
-                // Successfully connected - return this connection
-                return [
-                    'host' => $host,
-                    'socket' => $socket,
-                ];
-            }
-            // Connection failed, but don't add to skip list here (might be temporary)
-            // Skip list will be updated if handshake fails or in sequential fallback
-        }
-        
-        // All attempts failed - return null to use sequential fallback
-        // Sequential fallback will add to skip list if all retries fail
-        return null;
-    }
-    
-    /**
-     * Try VRFY command to verify email existence
-     * VRFY (Verify) is an SMTP command that can check if an email address exists
-     * 
-     * Response codes:
-     * - 250/251 = Email exists
-     * - 550 = Email doesn't exist
-     * - 502 = Command not implemented (most common)
-     * - 252 = Cannot verify (catch-all or other reason)
-     * 
-     * @param resource $socket Already connected SMTP socket with handshake done
-     * @param string $host MX hostname (for logging)
-     * @param string $email Email to verify
-     * @return array|null Array with 'valid' and 'method' keys, or null if command not supported
-     */
-    private function tryVrfyCommand($socket, string $host, string $email): ?array
-    {
-        if (!config('email-verification.enable_vrfy_check', true)) {
-            return null;
-        }
-        
-        $operationTimeout = $this->getSmtpOperationTimeout();
-        stream_set_timeout($socket, $operationTimeout, 0);
-        
-        $isTimeout = function() use ($socket) {
-            $info = stream_get_meta_data($socket);
-            return $info['timed_out'] ?? false;
-        };
-        
-        try {
-            // VRFY command
-            @fwrite($socket, "VRFY {$email}\r\n");
-            $response = @fgets($socket, 515);
-            
-            if (!$response || $isTimeout()) {
-                return null;
-            }
-            
-            $code = (int)substr($response, 0, 3);
-            $message = trim(substr($response, 4));
-            
-            // 250/251 = Email exists
-            if ($code === 250 || $code === 251) {
-                Log::debug('VRFY command successful', [
-                    'host' => $host,
-                    'email' => $email,
-                    'response' => trim($response),
-                ]);
-                return [
-                    'valid' => true,
-                    'method' => 'vrfy',
-                    'confidence' => 95, // High confidence when VRFY works
-                ];
-            }
-            
-            // 550 = Email doesn't exist
-            if ($code === 550) {
-                Log::debug('VRFY command: email does not exist', [
-                    'host' => $host,
-                    'email' => $email,
-                    'response' => trim($response),
-                ]);
-                return [
-                    'valid' => false,
-                    'method' => 'vrfy',
-                    'confidence' => 95, // High confidence when VRFY works
-                ];
-            }
-            
-            // 502 = Command not implemented (most common)
-            // 252 = Cannot verify (catch-all or other reason)
-            // 500 = Syntax error
-            // 501 = Parameter syntax error
-            if (in_array($code, [502, 252, 500, 501], true)) {
-                Log::debug('VRFY command not supported', [
-                    'host' => $host,
-                    'email' => $email,
-                    'code' => $code,
-                    'response' => trim($response),
-                ]);
-                return null; // Command not supported, try other methods
-            }
-            
-            // Other codes - log for debugging
-            Log::debug('VRFY command returned unexpected code', [
-                'host' => $host,
-                'email' => $email,
-                'code' => $code,
-                'response' => trim($response),
-            ]);
-            
-            return null;
-            
-        } catch (\Exception $e) {
-            Log::warning('VRFY command failed', [
-                'host' => $host,
-                'email' => $email,
-                'error' => $e->getMessage(),
-            ]);
-            return null;
-        }
-    }
-    
-    /**
-     * Try EXPN command to verify email existence
-     * EXPN (Expand) is an SMTP command that can check if an email address or mailing list exists
-     * 
-     * Response codes:
-     * - 250 = Email/mailing list exists
-     * - 550 = Email/mailing list doesn't exist
-     * - 502 = Command not implemented (most common)
-     * 
-     * Note: EXPN is less commonly supported than VRFY, but worth trying
-     * 
-     * @param resource $socket Already connected SMTP socket with handshake done
-     * @param string $host MX hostname (for logging)
-     * @param string $email Email to verify
-     * @return array|null Array with 'valid' and 'method' keys, or null if command not supported
-     */
-    private function tryExpnCommand($socket, string $host, string $email): ?array
-    {
-        if (!config('email-verification.enable_vrfy_check', true)) {
-            return null; // Use same config as VRFY
-        }
-        
-        $operationTimeout = $this->getSmtpOperationTimeout();
-        stream_set_timeout($socket, $operationTimeout, 0);
-        
-        $isTimeout = function() use ($socket) {
-            $info = stream_get_meta_data($socket);
-            return $info['timed_out'] ?? false;
-        };
-        
-        try {
-            // EXPN command
-            @fwrite($socket, "EXPN {$email}\r\n");
-            $response = @fgets($socket, 515);
-            
-            if (!$response || $isTimeout()) {
-                return null;
-            }
-            
-            $code = (int)substr($response, 0, 3);
-            $message = trim(substr($response, 4));
-            
-            // 250 = Email/mailing list exists
-            if ($code === 250) {
-                Log::debug('EXPN command successful', [
-                    'host' => $host,
-                    'email' => $email,
-                    'response' => trim($response),
-                ]);
-                return [
-                    'valid' => true,
-                    'method' => 'expn',
-                    'confidence' => 90, // Slightly lower than VRFY
-                ];
-            }
-            
-            // 550 = Email/mailing list doesn't exist
-            if ($code === 550) {
-                Log::debug('EXPN command: email does not exist', [
-                    'host' => $host,
-                    'email' => $email,
-                    'response' => trim($response),
-                ]);
-                return [
-                    'valid' => false,
-                    'method' => 'expn',
-                    'confidence' => 90,
-                ];
-            }
-            
-            // 502 = Command not implemented (most common)
-            // 500 = Syntax error
-            // 501 = Parameter syntax error
-            if (in_array($code, [502, 500, 501], true)) {
-                Log::debug('EXPN command not supported', [
-                    'host' => $host,
-                    'email' => $email,
-                    'code' => $code,
-                    'response' => trim($response),
-                ]);
-                return null; // Command not supported
-            }
-            
-            // Other codes - log for debugging
-            Log::debug('EXPN command returned unexpected code', [
-                'host' => $host,
-                'email' => $email,
-                'code' => $code,
-                'response' => trim($response),
-            ]);
-            
-            return null;
-            
-        } catch (\Exception $e) {
-            Log::warning('EXPN command failed', [
-                'host' => $host,
-                'email' => $email,
-                'error' => $e->getMessage(),
-            ]);
-            return null;
-        }
-    }
-    
-    /**
-     * Perform SMTP handshake (greeting, EHLO, MAIL FROM)
-     * This is done once per connection, then RCPT TO can be called multiple times
-     * 
-     * @param resource $socket Already connected SMTP socket
-     * @param string $host MX hostname (for logging)
-     * @return array Array with 'success' key
-     */
-    private function performSmtpHandshake($socket, string $host): array
-    {
-        $operationTimeout = $this->getSmtpOperationTimeout();
-        
-        // Set operation timeout
-        stream_set_timeout($socket, $operationTimeout, 0);
-        
-        // Helper to check timeout
-        $isTimeout = function() use ($socket) {
-            $info = stream_get_meta_data($socket);
-            return $info['timed_out'] ?? false;
-        };
-        
-        try {
-            // Read greeting with timeout check
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
-                return ['success' => false];
-            }
-            
-            // EHLO with configurable hostname
-            $heloHostname = $this->getSmtpHeloHostname();
-            @fwrite($socket, "EHLO {$heloHostname}\r\n");
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                return ['success' => false];
-            }
-            
-            // Read all EHLO responses (multi-line) with timeout protection
-            $maxLines = 10;
-            $lineCount = 0;
-            while ($lineCount < $maxLines) {
-                $line = @fgets($socket, 515);
-                if ($isTimeout() || !$line || !str_starts_with($line, '250')) {
-                    break;
-                }
-                $lineCount++;
-            }
-            
-            // MAIL FROM
-            @fwrite($socket, "MAIL FROM: <noreply@".gethostname().">\r\n");
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                return ['success' => false];
-            }
-            
-            return ['success' => true];
-            
-        } catch (\Exception $e) {
-            Log::warning('SMTP handshake failed', [
-                'host' => $host,
-                'error' => $e->getMessage(),
-            ]);
-            return ['success' => false];
-        }
-    }
-    
-    /**
-     * Perform RCPT TO only (assumes handshake already done)
-     * This is used for both catch-all check (random email) and specific email check
-     * 
-     * @param resource $socket Already connected SMTP socket with handshake done
-     * @param string $host MX hostname (for logging)
-     * @param string $email Email to check (can be random or specific)
-     * @return array Array with 'valid', 'mailbox_full', 'rejected', 'code' keys
-     */
-    private function performRcptToOnly($socket, string $host, string $email): array
-    {
-        $operationTimeout = $this->getSmtpOperationTimeout();
-        
-        // Set operation timeout
-        stream_set_timeout($socket, $operationTimeout, 0);
-        
-        // Helper to check timeout
-        $isTimeout = function() use ($socket) {
-            $info = stream_get_meta_data($socket);
-            return $info['timed_out'] ?? false;
-        };
-        
-        try {
-            // RCPT TO
-            @fwrite($socket, "RCPT TO: <{$email}>\r\n");
-            $response = @fgets($socket, 515);
-            
-            if (!$response || $isTimeout()) {
-                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
-            }
-            
-            // Analyze SMTP response
-            $responseAnalysis = $this->analyzeSmtpResponse($response);
-            
-            // Check for greylisting (4xx responses) - retry after delay
-            if ($responseAnalysis['is_greylisting'] && config('email-verification.enable_greylisting_retry', false)) {
-                $retryDelay = config('email-verification.greylisting_retry_delay', 2);
-                sleep($retryDelay);
-                
-                // Retry RCPT TO
-                @fwrite($socket, "RCPT TO: <{$email}>\r\n");
-                $retryResponse = @fgets($socket, 515);
-                
-                if ($retryResponse && !$isTimeout()) {
-                    $responseAnalysis = $this->analyzeSmtpResponse($retryResponse);
-                    $response = $retryResponse; // Update response for final check
-                }
-            }
-            
-            // Check if rejected (550 = mailbox not found)
-            $isRejected = $responseAnalysis['is_invalid'] && ($responseAnalysis['code'] === 550);
-            
-            return [
-                'valid' => $responseAnalysis['is_valid'],
-                'mailbox_full' => $responseAnalysis['is_mailbox_full'] ?? false,
-                'rejected' => $isRejected,
-                'code' => $responseAnalysis['code'] ?? null,
-            ];
-            
-        } catch (\Exception $e) {
-            Log::warning('RCPT TO check failed', [
-                'host' => $host,
-                'email' => $email,
-                'error' => $e->getMessage(),
-            ]);
-            return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
-        }
-    }
-    
-    /**
-     * Perform RCPT TO check on already connected socket (full handshake + RCPT TO)
-     * This is used for standalone checks (not part of catch-all flow)
-     * 
-     * @param resource $socket Already connected SMTP socket
-     * @param string $host MX hostname (for logging)
-     * @param string $email Email to check (can be random or specific)
-     * @return array Array with 'valid', 'mailbox_full', 'rejected', 'code' keys
-     */
-    private function performRcptToCheck($socket, string $host, string $email): array
-    {
-        $operationTimeout = $this->getSmtpOperationTimeout();
-        
-        // Set operation timeout
-        stream_set_timeout($socket, $operationTimeout, 0);
-        
-        // Helper to check timeout
-        $isTimeout = function() use ($socket) {
-            $info = stream_get_meta_data($socket);
-            return $info['timed_out'] ?? false;
-        };
-        
-        try {
-            // Read greeting with timeout check
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
-                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
-            }
-            
-            // EHLO with configurable hostname
-            $heloHostname = $this->getSmtpHeloHostname();
-            @fwrite($socket, "EHLO {$heloHostname}\r\n");
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
-            }
-            
-            // Read all EHLO responses (multi-line) with timeout protection
-            $maxLines = 10;
-            $lineCount = 0;
-            while ($lineCount < $maxLines) {
-                $line = @fgets($socket, 515);
-                if ($isTimeout() || !$line || !str_starts_with($line, '250')) {
-                    break;
-                }
-                $lineCount++;
-            }
-            
-            // MAIL FROM
-            @fwrite($socket, "MAIL FROM: <noreply@".gethostname().">\r\n");
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
-            }
-            
-            // RCPT TO
-            @fwrite($socket, "RCPT TO: <{$email}>\r\n");
-            $response = @fgets($socket, 515);
-            
-            if (!$response || $isTimeout()) {
-                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
-            }
-            
-            // Analyze SMTP response
-            $responseAnalysis = $this->analyzeSmtpResponse($response);
-            
-            // Check for greylisting (4xx responses) - retry after delay
-            if ($responseAnalysis['is_greylisting'] && config('email-verification.enable_greylisting_retry', false)) {
-                $retryDelay = config('email-verification.greylisting_retry_delay', 2);
-                sleep($retryDelay);
-                
-                // Retry RCPT TO
-                @fwrite($socket, "RCPT TO: <{$email}>\r\n");
-                $retryResponse = @fgets($socket, 515);
-                
-                if ($retryResponse && !$isTimeout()) {
-                    $responseAnalysis = $this->analyzeSmtpResponse($retryResponse);
-                    $response = $retryResponse; // Update response for final check
-                }
-            }
-            
-            // Check if rejected (550 = mailbox not found)
-            $isRejected = $responseAnalysis['is_invalid'] && ($responseAnalysis['code'] === 550);
-            
-            // Note: Don't close socket here - it will be closed by caller
-            // This allows reuse of the same connection for catch-all check and then specific email check
-            
-            return [
-                'valid' => $responseAnalysis['is_valid'],
-                'mailbox_full' => $responseAnalysis['is_mailbox_full'] ?? false,
-                'rejected' => $isRejected,
-                'code' => $responseAnalysis['code'] ?? null,
-            ];
-            
-        } catch (\Exception $e) {
-            Log::warning('RCPT TO check failed', [
-                'host' => $host,
-                'email' => $email,
-                'error' => $e->getMessage(),
-            ]);
-            return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
-        }
-    }
-    
-    /**
-     * Fallback: Perform sequential SMTP check (backward compatibility)
-     * Used when concurrent connection fails
-     */
-    private function performSequentialSmtpCheck(array $mxRecordsToTry, string $email): array
-    {
-        $mailboxFull = false;
-        
-        foreach ($mxRecordsToTry as $mx) {
-            $host = $mx['host'];
-            $retries = $this->getSmtpRetries();
-            
-            for ($attempt = 0; $attempt < $retries; $attempt++) {
-                $result = $this->performSmtpCheckWithDetails($host, $email);
-                
-                if ($result['valid']) {
-                    return ['valid' => true, 'mailbox_full' => $result['mailbox_full'] ?? false, 'catch_all' => false];
-                }
-                
-                // Track mailbox full status
-                if ($result['mailbox_full'] ?? false) {
-                    $mailboxFull = true;
-                }
-                
-                // If connection failed, add to skip list (if auto-add enabled)
-                if ($attempt === $retries - 1) {
-                    // Last attempt failed, add to skip list
-                    $this->addMxToSkipList($host, 'SMTP connection failed');
-                }
-                
-                // Skip retry delay on last attempt to save time
-                if ($attempt < $retries - 1) {
-                    usleep(300000); // 0.3 second delay between retries
-                }
-            }
-        }
-
-        return ['valid' => false, 'mailbox_full' => $mailboxFull, 'catch_all' => false];
-    }
-
-    /**
-     * Analyze SMTP response code and message
-     */
-    private function analyzeSmtpResponse(string $response): array
-    {
-        $code = (int)substr($response, 0, 3);
-        $message = trim(substr($response, 4));
-        $messageLower = strtolower($message);
-        
-        // Check for mailbox full indicators
-        $mailboxFullIndicators = [
-            'mailbox full',
-            'quota exceeded',
-            'quota full',
-            'storage quota',
-            'mailbox quota',
-            'over quota',
-            'exceeded storage',
-            'mailbox is full',
-            'inbox full',
-        ];
-        
-        $isMailboxFull = false;
-        foreach ($mailboxFullIndicators as $indicator) {
-            if (str_contains($messageLower, $indicator)) {
-                $isMailboxFull = true;
-                break;
-            }
-        }
-        
-        // Also check for specific error codes that indicate mailbox full
-        // 552 = Requested mail action aborted: exceeded storage allocation
-        if ($code === 552) {
-            $isMailboxFull = true;
-        }
-        
-        return [
-            'code' => $code,
-            'message' => $message,
-            'is_greylisting' => in_array($code, [450, 451, 452], true), // Temporary failures
-            'is_catch_all' => in_array($code, [251, 252], true), // Catch-all indicators
-            'is_valid' => in_array($code, [250, 251, 252], true), // Valid responses
-            'is_invalid' => in_array($code, [550, 551, 552, 553, 554], true), // Permanent failures
-            'is_temporary' => $code >= 400 && $code < 500, // 4xx = temporary
-            'is_permanent' => $code >= 500 && $code < 600, // 5xx = permanent
-            'is_mailbox_full' => $isMailboxFull,
-        ];
-    }
-
-    private function performSmtpCheck(string $host, string $email): bool
-    {
-        $result = $this->performSmtpCheckWithDetails($host, $email);
-        return $result['valid'];
-    }
-    
-    /**
-     * Perform concurrent SMTP check by attempting connections to all MX servers simultaneously
-     * and using the first one that connects successfully.
-     * 
-     * Note: Due to PHP limitations, this uses a simplified concurrent approach:
-     * - Attempts connections with very short timeouts in sequence
-     * - Uses the first successful connection
-     * - Falls back to sequential method if all fail
-     * 
-     * Returns result array if successful, null if all connections failed (fallback to sequential)
-     */
-    private function performConcurrentSmtpCheck(array $mxRecords, string $email): ?array
-    {
-        if (empty($mxRecords) || count($mxRecords) === 1) {
-            // No benefit for single MX record
-            return null;
-        }
-        
-        $connectTimeout = $this->getSmtpConnectTimeout();
-        $quickTimeout = min(0.5, $connectTimeout / 2); // Very quick timeout for concurrent attempt
-        
-        // Try to connect to all MX servers with quick timeout, use first that succeeds
-        foreach ($mxRecords as $mx) {
-            $host = $mx['host'];
-            
-            // Quick connection attempt
-            $socket = @fsockopen($host, 25, $errno, $errstr, $quickTimeout);
-            
-            if ($socket !== false) {
-                // Successfully connected - use this socket
-                try {
-                    return $this->performSmtpCheckWithSocket($socket, $host, $email);
-                } catch (\Exception $e) {
-                    @fclose($socket);
-                    continue; // Try next MX
-                }
-            }
-        }
-        
-        // All quick attempts failed, return null to use sequential fallback
-        return null;
-    }
-    
-    /**
-     * Perform SMTP check using an already connected socket
-     * This is a helper method for concurrent connections
-     */
-    private function performSmtpCheckWithSocket($socket, string $host, string $email): array
-    {
-        $operationTimeout = $this->getSmtpOperationTimeout();
-        
-        try {
-            // Set operation timeout
-            stream_set_timeout($socket, $operationTimeout, 0);
-            
-            // Helper to check timeout
-            $isTimeout = function() use ($socket) {
-                $info = stream_get_meta_data($socket);
-                return $info['timed_out'] ?? false;
-            };
-            
-            // Read greeting with timeout check
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
-                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-            }
-            
-            // EHLO with configurable hostname
-            $heloHostname = $this->getSmtpHeloHostname();
-            @fwrite($socket, "EHLO {$heloHostname}\r\n");
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-            }
-            
-            // Read all EHLO responses (multi-line) with timeout protection
-            $maxLines = 10;
-            $lineCount = 0;
-            while ($lineCount < $maxLines) {
-                $line = @fgets($socket, 515);
-                if ($isTimeout() || !$line || !str_starts_with($line, '250')) {
-                    break;
-                }
-                $lineCount++;
-            }
-            
-            // MAIL FROM
-            @fwrite($socket, "MAIL FROM: <noreply@".gethostname().">\r\n");
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-            }
-            
-            // RCPT TO
-            @fwrite($socket, "RCPT TO: <{$email}>\r\n");
-            $response = @fgets($socket, 515);
-            
-            if (!$response || $isTimeout()) {
-                @fwrite($socket, "QUIT\r\n");
-                @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-            }
-            
-            // Analyze SMTP response
-            $responseAnalysis = $this->analyzeSmtpResponse($response);
-            
-            // Check for greylisting (4xx responses) - retry after delay
-            if ($responseAnalysis['is_greylisting'] && config('email-verification.enable_greylisting_retry', false)) {
-                $retryDelay = config('email-verification.greylisting_retry_delay', 2);
-                sleep($retryDelay);
-                
-                // Retry RCPT TO
-                @fwrite($socket, "RCPT TO: <{$email}>\r\n");
-                $retryResponse = @fgets($socket, 515);
-                
-                if ($retryResponse && !$isTimeout()) {
-                    $responseAnalysis = $this->analyzeSmtpResponse($retryResponse);
-                    $response = $retryResponse; // Update response for final check
-                }
-            }
-            
-            // QUIT
-            @fwrite($socket, "QUIT\r\n");
-            @fclose($socket);
-            
-            // Check RCPT TO response - valid responses
-            return [
-                'valid' => $responseAnalysis['is_valid'],
-                'mailbox_full' => $responseAnalysis['is_mailbox_full'] ?? false,
-                'catch_all' => false, // This method doesn't do catch-all detection
-            ];
-            
-        } catch (\Exception $e) {
-            @fclose($socket);
-            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-        }
-    }
-
-    private function performSmtpCheckWithDetails(string $host, string $email): array
-    {
-        $connectTimeout = $this->getSmtpConnectTimeout();
-        $operationTimeout = $this->getSmtpOperationTimeout();
-        
-        // Use connection timeout for initial connection
-        $socket = @fsockopen($host, 25, $errno, $errstr, $connectTimeout);
-        
-        if (!$socket) {
-            // Connection failed, add to skip list if auto-add enabled
-            $this->addMxToSkipList($host, 'SMTP connection failed');
-            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-        }
-
-        try {
-            // Set operation timeout for all subsequent operations
-            stream_set_timeout($socket, $operationTimeout, 0); // seconds, microseconds
-            
-            // Helper to check timeout
-            $isTimeout = function() use ($socket) {
-                $info = stream_get_meta_data($socket);
-                return $info['timed_out'] ?? false;
-            };
-            
-            // Read greeting with timeout check
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
-                @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-            }
-
-            // EHLO with configurable hostname
-            $heloHostname = $this->getSmtpHeloHostname();
-            @fwrite($socket, "EHLO {$heloHostname}\r\n");
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-            }
-
-            // Read all EHLO responses (multi-line) with timeout protection
-            $maxLines = 10; // Safety limit
-            $lineCount = 0;
-            while ($lineCount < $maxLines) {
-                $line = @fgets($socket, 515);
-                if ($isTimeout() || !$line || !str_starts_with($line, '250')) {
-                    break;
-                }
-                $lineCount++;
-            }
-
-            // MAIL FROM
-            @fwrite($socket, "MAIL FROM: <noreply@".gethostname().">\r\n");
-            $response = @fgets($socket, 515);
-            if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-            }
-
-            // RCPT TO
-            @fwrite($socket, "RCPT TO: <{$email}>\r\n");
-            $response = @fgets($socket, 515);
-            
-            if (!$response || $isTimeout()) {
-                @fwrite($socket, "QUIT\r\n");
-                @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false];
-            }
-            
-            // Analyze SMTP response
-            $responseAnalysis = $this->analyzeSmtpResponse($response);
-            
-            // Check for greylisting (4xx responses) - retry after delay
-            if ($responseAnalysis['is_greylisting'] && config('email-verification.enable_greylisting_retry', false)) {
-                $retryDelay = config('email-verification.greylisting_retry_delay', 5);
-                sleep($retryDelay);
-                
-                // Retry RCPT TO
-                @fwrite($socket, "RCPT TO: <{$email}>\r\n");
-                $retryResponse = @fgets($socket, 515);
-                
-                if ($retryResponse && !$isTimeout()) {
-                    $responseAnalysis = $this->analyzeSmtpResponse($retryResponse);
-                    $response = $retryResponse; // Update response for final check
-                }
-            }
-            
-            // Check for error patterns before closing connection
-            if (!$responseAnalysis['is_valid'] && !$responseAnalysis['is_greylisting']) {
-                $errorPatterns = config('email-verification.smtp_error_patterns', []);
-                $responseLower = strtolower($response);
-                
-                foreach ($errorPatterns as $pattern) {
-                    if (str_contains($responseLower, strtolower($pattern))) {
-                        // Add MX to skip list
-                        $this->addMxToSkipList($host, "SMTP error: {$pattern}", trim($response));
-                        
-                        Log::warning('SMTP error pattern detected', [
-                            'host' => $host,
-                            'email' => $email,
-                            'pattern' => $pattern,
-                            'response' => trim($response),
-                            'code' => $responseAnalysis['code'],
-                        ]);
-                        
-                        @fwrite($socket, "QUIT\r\n");
-                        @fclose($socket);
-                        return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-                    }
-                }
-            }
-            
-            // QUIT
-            @fwrite($socket, "QUIT\r\n");
-            @fclose($socket);
-
-            // Check RCPT TO response - valid responses
-            return [
-                'valid' => $responseAnalysis['is_valid'],
-                'mailbox_full' => $responseAnalysis['is_mailbox_full'] ?? false,
-                'catch_all' => false, // Sequential check doesn't do catch-all detection
-            ];
-
-        } catch (\Exception $e) {
-            @fclose($socket);
-            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
-        }
-    }
-
-    /**
-     * Calculate verification score based on checks
-     * Improved scoring system inspired by Go email-verifier:
-     * - More balanced weights (not too dependent on SMTP)
-     * - Domain validity included in score
-     * - Better handling of public providers (SMTP often unavailable)
-     * 
-     * @param array $checks
-     * @return int Score from 0 to 100
-     */
-    private function calculateScore(array $checks): int
-    {
-        $weights = $this->getScoreWeights();
-        $score = 0;
-
-        // If any high-risk check fails, score is 0
-        if ($checks['no_reply'] ?? false) {
-            return 0; // No-reply keywords = 0
-        }
-        if ($checks['typo_domain'] ?? false) {
-            return 0; // Typo domains = 0
-        }
-        if ($checks['isp_esp'] ?? false) {
-            return 0; // ISP/ESP domains = 0
-        }
-        if ($checks['blacklist'] ?? false) {
-            return 0; // Blacklisted emails = 0
-        }
-
-        // Base checks (required for any score)
-        if ($checks['syntax'] ?? false) {
-            $score += $weights['syntax'] ?? 20;
-        } else {
-            // No syntax = no score
-            return 0;
-        }
-
-        // Domain validity check (DNS resolution)
-        if ($checks['domain_validity'] ?? false) {
-            $score += $weights['domain_validity'] ?? 20;
-        } else {
-            // Domain doesn't exist = very low score
-            return max(0, $score);
-        }
-
-        // MX records check
-        if ($checks['mx_record'] ?? false) {
-            $score += $weights['mx_record'] ?? 25;
-        }
-
-        // SMTP check (optional, often unavailable for public providers)
-        if ($checks['smtp'] ?? false) {
-            $score += $weights['smtp'] ?? 25;
-        }
-        // Note: If SMTP is not checked (public providers), score can still be high
-        // if domain_validity and mx_record pass (up to 65 points)
-
-        // Disposable email check (negative check - add points if NOT disposable)
-        if (!($checks['disposable'] ?? false)) {
-            $score += $weights['disposable'] ?? 10;
-        } else {
-            $score = 0; // Disposable emails get 0
-            return 0;
-        }
-
-        // Role-based email bonus (adds points if NOT role-based, matches Go behavior)
-        if (!($checks['role'] ?? false)) {
-            $score += $weights['role_bonus'] ?? 10; // Add points if NOT role-based (matches Go)
-        }
-
-        // Mailbox full penalty (significant penalty - email cannot receive mail)
-        if ($checks['mailbox_full'] ?? false) {
-            $score -= $weights['mailbox_full_penalty'] ?? 30; // Significant penalty
-        }
-
-        // Free email provider penalty (small penalty - free emails can be less reliable)
-        if ($checks['free'] ?? $checks['is_free'] ?? false) {
-            $freePenalty = $weights['free_email_penalty'] ?? 5;
-            if ($freePenalty > 0) {
-                $score -= $freePenalty; // Small penalty for free email providers
-            }
-        }
-
-        // Government TLD penalty (reduces score but doesn't zero it)
-        if ($checks['government_tld'] ?? false) {
-            $score -= 10; // Small penalty for government TLDs
-        }
-
-        // Clamp score between 0 and 100
-        return max(0, min(100, $score));
-    }
-    
-    /**
-     * Calculate Hunter.io style confidence score (0-100%)
-     * 
-     * Hunter.io assigns confidence % based on publicly available data.
-     * Recommended filter: ~85-90% confidence for catch-all emails.
-     * 
-     * Base confidence:
-     * - Syntax: +10%
-     * - Domain validity: +15%
-     * - MX record: +20%
-     * - SMTP: +30% (highest weight)
-     * 
-     * Catch-all specific:
-     * - Reduce confidence by 30% if catch-all
-     * - Add bonuses:
-     *   - Gravatar: +15%
-     *   - DMARC reject: +10%
-     *   - DMARC quarantine: +5%
-     *   - VRFY/EXPN: +10%
-     * 
-     * Penalties:
-     * - Disposable: 0%
-     * - Role: -20%
-     * - Typo: 0%
-     * - No-reply: 0%
-     * - Blacklist: 0%
-     * 
-     * @param array $checks Verification checks
-     * @param bool $isCatchAll Whether email is from catch-all server
-     * @param array $result Full verification result (for Gravatar, DMARC, etc.)
-     * @return int Confidence score (0-100)
-     */
-    private function calculateHunterStyleConfidence(array $checks, bool $isCatchAll, array $result = []): int
-    {
-        $confidence = 0;
-        
-        // Base confidence from checks
-        if ($checks['syntax'] ?? false) {
-            $confidence += 10;
-        }
-        
-        if ($checks['domain_validity'] ?? false) {
-            $confidence += 15;
-        }
-        
-        if ($checks['mx_record'] ?? false) {
-            $confidence += 20;
-        }
-        
-        if ($checks['smtp'] ?? false) {
-            $confidence += 30; // Highest weight - SMTP is most reliable
-        }
-        
-        // Catch-all specific adjustments
-        if ($isCatchAll) {
-            // Reduce confidence for catch-all (30% reduction)
-            $confidence = (int)($confidence * 0.7);
-            
-            // Add bonuses for catch-all emails
-            if (($result['gravatar'] ?? false)) {
-                $confidence += 15; // Gravatar indicates active user
-            }
-            
-            if (isset($result['dmarc']['policy'])) {
-                $dmarcPolicy = $result['dmarc']['policy'];
-                if ($dmarcPolicy === 'reject') {
-                    $confidence += 10; // DMARC reject = strict security
-                } elseif ($dmarcPolicy === 'quarantine') {
-                    $confidence += 5; // DMARC quarantine = moderate security
-                }
-            }
-            
-            // VRFY/EXPN verification method adds confidence
-            if (isset($result['verification_method'])) {
-                $confidence += 10; // VRFY/EXPN = definitive answer
-            }
-        }
-        
-        // Penalties
-        if ($checks['disposable'] ?? false) {
-            $confidence = 0; // Disposable emails = 0% confidence
-        }
-        
-        if ($checks['role'] ?? false) {
-            $confidence = max(0, $confidence - 20); // Role emails = -20%
-        }
-        
-        if ($checks['typo_domain'] ?? false) {
-            $confidence = 0; // Typo domains = 0% confidence
-        }
-        
-        if ($checks['no_reply'] ?? false) {
-            $confidence = 0; // No-reply emails = 0% confidence
-        }
-        
-        if ($checks['blacklist'] ?? false) {
-            $confidence = 0; // Blacklisted emails = 0% confidence
-        }
-        
-        // Clamp to 0-100
-        return min(100, max(0, $confidence));
-    }
 
     /**
      * Optimized batch verification with domain grouping
      * Groups emails by domain and caches domain validation results
-     * 
+     *
      * @param array $emails
      * @param int|null $userId
      * @param int|null $teamId
@@ -3359,9 +728,9 @@ class EmailVerificationService
         // 1. Group emails by domain
         $emailsByDomain = [];
         $emailToDomain = [];
-        
+
         foreach ($emails as $email) {
-            $parts = $this->parseEmail($email);
+            $parts = $this->emailParserService->parseEmail($email);
             if ($parts) {
                 $domain = $parts['domain'];
                 $emailsByDomain[$domain][] = $email;
@@ -3380,12 +749,11 @@ class EmailVerificationService
             $result = $this->verify($email, $userId, $teamId, $tokenId, $bulkJobId, $source);
             $results[] = $result;
         }
-        
+
         // Record batch metrics
         $batchDuration = microtime(true) - $batchStartTime;
         try {
-            $metrics = app(MetricsService::class);
-            $metrics->recordBatchProcessing(count($emails), $batchDuration);
+            $this->metricsService->recordBatchProcessing(count($emails), $batchDuration);
         } catch (\Exception $e) {
             Log::debug('Failed to record batch metrics', ['error' => $e->getMessage()]);
         }
@@ -3396,7 +764,7 @@ class EmailVerificationService
     /**
      * Validate multiple domains concurrently using optimized caching
      * This method groups domain validations and uses cache to avoid redundant checks
-     * 
+     *
      * @param array $domains
      * @return array Domain validation results keyed by domain
      */
@@ -3407,22 +775,22 @@ class EmailVerificationService
         }
 
         $domainResults = [];
-        
+
         // Process domains in parallel using array_map for better performance
         // Note: PHP doesn't have true concurrency, but this optimizes the order
         // and uses caching to minimize redundant DNS lookups
         $results = array_map(function ($domain) {
             // All these methods use internal caching, so redundant calls are fast
-            $mxRecords = $this->getMxRecords($domain);
-            $domainValidity = $this->checkDomainValidity($domain);
-            
+            $mxRecords = $this->domainValidationService->getMxRecords($domain);
+            $domainValidity = $this->domainValidationService->checkDomainValidity($domain);
+
             return [
                 'domain' => $domain,
                 'domain_validity' => $domainValidity['valid'] ?? false,
-                'mx_record' => $this->checkMx($domain),
-                'disposable' => $this->checkDisposable($domain),
+                'mx_record' => $this->domainValidationService->checkMx($domain),
+                'disposable' => $this->emailParserService->checkDisposable($domain),
                 'mx_records' => $mxRecords,
-                'is_public_provider' => $this->isPublicProvider($domain, $mxRecords) !== null,
+                'is_public_provider' => $this->domainValidationService->isPublicProvider($domain, $mxRecords) !== null,
             ];
         }, array_unique($domains));
 
@@ -3436,7 +804,7 @@ class EmailVerificationService
 
     /**
      * Get API status and health information
-     * 
+     *
      * @return array
      */
     public function getStatus(): array
@@ -3444,15 +812,15 @@ class EmailVerificationService
         // Try to get Laravel start time from request or use current time
         $startTime = defined('LARAVEL_START') ? LARAVEL_START : (request()->server('REQUEST_TIME_FLOAT') ?? microtime(true));
         $uptime = microtime(true) - $startTime;
-        
+
         // Get memory usage
         $memoryUsage = memory_get_usage(true);
         $memoryPeak = memory_get_peak_usage(true);
-        
+
         // Get recent verification stats (last hour)
         $recentVerifications = EmailVerification::where('created_at', '>=', now()->subHour())
             ->count();
-        
+
         // Get queue stats if Horizon is available
         $queueStats = null;
         if (class_exists(\Laravel\Horizon\Horizon::class)) {
@@ -3479,7 +847,7 @@ class EmailVerificationService
 
     /**
      * Format uptime in human-readable format
-     * 
+     *
      * @param float $seconds
      * @return string
      */
@@ -3488,24 +856,25 @@ class EmailVerificationService
         if ($seconds < 60) {
             return round($seconds, 1) . 's';
         }
-        
+
         $minutes = floor($seconds / 60);
         if ($minutes < 60) {
             return $minutes . 'm ' . round($seconds % 60, 0) . 's';
         }
-        
+
         $hours = floor($minutes / 60);
         $minutes = $minutes % 60;
-        
+
         if ($hours < 24) {
             return $hours . 'h ' . $minutes . 'm';
         }
-        
+
         $days = floor($hours / 24);
         $hours = $hours % 24;
-        
+
         return $days . 'd ' . $hours . 'h';
     }
 }
+
 
 

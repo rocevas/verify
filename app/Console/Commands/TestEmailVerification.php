@@ -122,12 +122,6 @@ class TestEmailVerification extends Command
                 $this->newLine();
             }
             
-            // Hunter.io style confidence
-            if (isset($result['hunter_confidence'])) {
-                $this->info("Hunter.io Confidence: " . $result['hunter_confidence'] . "%");
-                $this->line("  Recommended filter: ~85-90% for catch-all emails");
-                $this->newLine();
-            }
             
             // AI info
             if (isset($result['ai_analysis']) && $result['ai_analysis']) {

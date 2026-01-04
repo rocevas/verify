@@ -165,17 +165,18 @@ return [
     */
 
     'score_weights' => [
-        'syntax' => 20,
-        'domain_validity' => 20, // Domain exists and is valid (DNS resolution) - matches Go: domain_exists
-        'mx_record' => 20, // Matches Go: mx_records (was 25)
-        'smtp' => 20, // Matches Go: mailbox_exists (was 25)
-        'disposable' => 10, // Added if not disposable - matches Go: is_disposable
-        'role_bonus' => 10, // Added if NOT role-based - matches Go: is_role_based (was role_penalty)
+        // Round numbers for cleaner scoring (no decimals)
+        'syntax' => 20, // Base syntax check
+        'domain_validity' => 20, // Domain exists and is valid (DNS resolution)
+        'mx_record' => 25, // MX records check (increased to make base score 85 without SMTP)
+        'smtp' => 20, // SMTP check (optional, often unavailable for public providers)
+        'disposable' => 10, // Added if not disposable
+        'role_bonus' => 10, // Added if NOT role-based
         'mailbox_full_penalty' => 30, // Penalty if mailbox is full (email cannot receive mail)
         'free_email_penalty' => 0, // Small penalty for free email providers (disabled - no penalty)
-        'gravatar_bonus' => 5, // Bonus if email has Gravatar (for catch-all emails) - matches gravatar_score_bonus
-        'dmarc_reject_bonus' => 10, // Bonus if DMARC policy = "reject" (for catch-all emails) - higher confidence
-        'dmarc_quarantine_bonus' => 5, // Bonus if DMARC policy = "quarantine" (for catch-all emails) - moderate confidence
+        'gravatar_bonus' => 5, // Bonus if email has Gravatar (for catch-all emails)
+        'dmarc_reject_bonus' => 10, // Bonus if DMARC policy = "reject" (for catch-all emails)
+        'dmarc_quarantine_bonus' => 5, // Bonus if DMARC policy = "quarantine" (for catch-all emails)
         'government_tld_penalty' => 10, // Penalty for government TLDs (reduces score but doesn't zero it)
     ],
 
