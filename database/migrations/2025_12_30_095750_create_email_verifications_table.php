@@ -20,7 +20,8 @@ return new class extends Migration
             $table->foreignId('bulk_verification_job_id')->nullable()->constrained('bulk_verification_jobs')->nullOnDelete();
             $table->enum('state', ['deliverable', 'undeliverable', 'risky', 'unknown', 'error'])->default('unknown')->comment('deliverable, undeliverable, risky, unknown, error');
             $table->string('result')->nullable()->comment('Result: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error');
-//            $table->enum('result', ['valid', 'invalid', 'catch_all', 'unknown', 'spamtrap', 'abuse', 'do_not_mail', 'risky'])->default('unknown')->comment('Result: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error');
+            $table->string('reason')->nullable()->comment('Reason: accepted_email, invalid_email, invalid_domain, rejected_email, invalid_smtp, low_quality, low_deliverability, no_connect, timeout, unavailable_smtp, unexpected_error (matches Emailable API format)');
+
             $table->integer('score')->nullable();
             $table->integer('email_score')->nullable();
             $table->string('source')->nullable();
@@ -62,6 +63,7 @@ return new class extends Migration
             // Other indexes
             $table->index(['email', 'state']);
             $table->index(['state', 'result']); // For filtering by state and result
+            $table->index(['state', 'reason']);
             $table->index('bulk_verification_job_id');
         });
     }

@@ -70,7 +70,8 @@ class TestEmailVerification extends Command
             // Basic info
             $this->line("Email: " . ($result['email'] ?? $email));
             $this->line("State: " . ($result['state'] ?? 'unknown'));
-            $this->line("Result: " . ($result['result'] ?? 'unknown'));
+            $this->line("Reason: " . ($result['reason'] ?? $result['result'] ?? 'unknown') . " " . ($result['reason'] ? '(Emailable format)' : '(backward compat)'));
+            $this->line("Result: " . ($result['result'] ?? 'unknown') . " (backward compat)");
             $this->line("Score: " . ($result['score'] ?? 0));
             $this->line("Duration: {$duration}s");
             $this->newLine();

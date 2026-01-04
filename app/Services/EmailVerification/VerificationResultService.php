@@ -61,7 +61,8 @@ class VerificationResultService
         $formatted = [
             'email' => $result['email'] ?? '',
             'state' => $result['state'] ?? 'unknown',
-            'result' => $result['result'] ?? null,
+            'reason' => $result['reason'] ?? $result['result'] ?? null, // Emailable API format (primary)
+            'result' => $result['result'] ?? $result['reason'] ?? null, // Backward compatibility
             'account' => $result['account'] ?? null,
             'domain' => $result['domain'] ?? null,
             'score' => $result['score'] ?? 0,
@@ -186,7 +187,8 @@ class VerificationResultService
                 'account' => $parts['account'] ?? null,
                 'domain' => $parts['domain'] ?? null,
                 'state' => $result['state'] ?? 'unknown',
-                'result' => $result['result'] ?? null,
+                'result' => $result['result'] ?? null, // Backward compatibility
+                'reason' => $result['reason'] ?? $result['result'] ?? null, // Emailable API format
                 'syntax' => $result['syntax'] ?? false,
                 'mx_record' => $result['mx_record'] ?? false,
                 'smtp' => $result['smtp'] ?? false,
@@ -247,148 +249,149 @@ class VerificationResultService
     }
     
     /**
-     * Determine state and result based on checks and current status
+     * Determine state and result/reason based on checks and current status
      * Following Emailable API format: https://help.emailable.com/en-us/article/verification-results-all-possible-states-and-reasons-fjsjn2/
      * 
      * @param array $result
-     * @return array ['state' => string, 'result' => string|null]
+     * @return array ['state' => string, 'result' => string|null, 'reason' => string|null]
      */
     public function determineStateAndResult(array $result): array
     {
         $currentStatus = $result['status'] ?? 'unknown';
         $error = $result['error'] ?? null;
         
-        // Check for syntax error first (highest priority)
-        if (!($result['syntax'] ?? false)) {
+        // Helper function to return state, result (backward compat), and reason (Emailable format)
+        $makeResult = function($state, $resultValue, $emailableReason) {
             return [
-                'state' => 'undeliverable',
-                'result' => 'syntax_error',
+                'state' => $state,
+                'result' => $resultValue, // Kept for backward compatibility (our old format)
+                'reason' => $emailableReason, // Emailable API format
             ];
+        };
+        
+        // Check for syntax error first (highest priority)
+        // Emailable: invalid_email - The email address does not pass syntax validations
+        if (!($result['syntax'] ?? false)) {
+            return $makeResult('undeliverable', 'syntax_error', 'invalid_email');
         }
         
         // Check for typo domain
+        // Emailable: invalid_domain - The email address domain does not exist, is not valid, or should not be mailed to
         if ($result['typo_domain'] ?? false) {
-            return [
-                'state' => 'undeliverable',
-                'result' => 'typo',
-            ];
+            return $makeResult('undeliverable', 'typo', 'invalid_domain');
         }
         
         // Check for disposable email
+        // Emailable: low_quality - The email address has quality issues (Risky state)
         if ($result['disposable'] ?? false) {
-            return [
-                'state' => 'undeliverable',
-                'result' => 'disposable',
-            ];
+            return $makeResult('undeliverable', 'disposable', 'invalid_domain');
         }
         
         // Check for blacklist/blocked
+        // Emailable: invalid_domain - Should not be mailed to
         if ($result['blacklist'] ?? false || $currentStatus === 'spamtrap' || $currentStatus === 'abuse' || $currentStatus === 'do_not_mail') {
-            return [
-                'state' => 'undeliverable',
-                'result' => 'blocked',
-            ];
+            return $makeResult('undeliverable', 'blocked', 'invalid_domain');
         }
         
         // Check for mailbox full
+        // Emailable: low_deliverability - The email address appears to be deliverable, but deliverability cannot be guaranteed (Risky)
         if ($result['mailbox_full'] ?? false) {
-            return [
-                'state' => 'risky',
-                'result' => 'mailbox_full',
-            ];
+            return $makeResult('risky', 'mailbox_full', 'low_deliverability');
         }
         
         // Check for role-based email
+        // Emailable: low_quality - The email address has quality issues (Risky)
         if ($result['role'] ?? false) {
-            return [
-                'state' => 'risky',
-                'result' => 'role',
-            ];
+            return $makeResult('risky', 'role', 'low_quality');
         }
         
         // Check for catch-all (only if actually detected, not just based on score or status)
-        // Only return catch_all if the catch_all flag is actually true
+        // Emailable: low_deliverability - The email address appears to be deliverable, but deliverability cannot be guaranteed (Risky)
         if ($result['catch_all'] ?? false) {
-            return [
-                'state' => 'risky',
-                'result' => 'catch_all',
-            ];
+            return $makeResult('risky', 'catch_all', 'low_deliverability');
         }
         
         // Check for valid email (SMTP verified or high confidence)
+        // Emailable: accepted_email - The email address exists and is deliverable
         if ($result['smtp'] ?? false) {
-            return [
-                'state' => 'deliverable',
-                'result' => 'valid',
-            ];
+            return $makeResult('deliverable', 'valid', 'accepted_email');
         }
         
         // If MX records exist and domain is valid, but SMTP not checked (public providers)
+        // Emailable: accepted_email - The email address exists and is deliverable
         if (($result['mx_record'] ?? false) && ($result['domain_validity'] ?? false) && $currentStatus === 'valid') {
-            return [
-                'state' => 'deliverable',
-                'result' => 'valid',
-            ];
+            return $makeResult('deliverable', 'valid', 'accepted_email');
         }
         
         // Check for invalid domain or no MX records
+        // Emailable: invalid_domain - The email address domain does not exist
         if (!($result['mx_record'] ?? false) || !($result['domain_validity'] ?? false)) {
             if ($currentStatus === 'invalid') {
-                return [
-                    'state' => 'undeliverable',
-                    'result' => 'mailbox_not_found',
-                ];
+                return $makeResult('undeliverable', 'mailbox_not_found', 'invalid_domain');
+            }
+        }
+        
+        // Check for SMTP rejection (mailbox doesn't exist)
+        // Emailable: rejected_email - The email address was rejected by the mail server because it does not exist
+        if (($result['smtp'] ?? false) === false && ($result['mx_record'] ?? false) && ($result['domain_validity'] ?? false)) {
+            if ($currentStatus === 'invalid') {
+                return $makeResult('undeliverable', 'mailbox_not_found', 'rejected_email');
             }
         }
         
         // Check for connection/timeout errors
-        if ($error && (
-            str_contains(strtolower($error), 'timeout') ||
-            str_contains(strtolower($error), 'connection') ||
-            str_contains(strtolower($error), 'unavailable') ||
-            str_contains(strtolower($error), 'could not connect')
-        )) {
-            return [
-                'state' => 'unknown',
-                'result' => null,
-            ];
+        // Emailable: timeout, no_connect, unavailable_smtp
+        if ($error) {
+            $errorLower = strtolower($error);
+            if (str_contains($errorLower, 'timeout')) {
+                return $makeResult('unknown', null, 'timeout');
+            }
+            if (str_contains($errorLower, 'unavailable') || str_contains($errorLower, 'server was unavailable')) {
+                return $makeResult('unknown', null, 'unavailable_smtp');
+            }
+            if (str_contains($errorLower, 'connection') || str_contains($errorLower, 'could not connect') || str_contains($errorLower, 'connect')) {
+                return $makeResult('unknown', null, 'no_connect');
+            }
         }
         
         // Check for unexpected errors
+        // Emailable: unexpected_error - An unexpected error occurred
         if ($error && $currentStatus === 'unknown') {
-            return [
-                'state' => 'error',
-                'result' => 'error',
-            ];
+            return $makeResult('unknown', 'error', 'unexpected_error');
         }
         
-        // Default: unknown
+        // Default: unknown (no specific reason)
         if ($currentStatus === 'unknown') {
-            return [
-                'state' => 'unknown',
-                'result' => null,
-            ];
+            return $makeResult('unknown', null, null);
         }
         
         // Fallback: map old status to new format
-        // Only map 'catch_all' status to catch_all result if catch_all flag is true
         $isCatchAll = $result['catch_all'] ?? false;
-        return [
-            'state' => match($currentStatus) {
-                'valid' => 'deliverable',
-                'invalid', 'spamtrap', 'abuse', 'do_not_mail' => 'undeliverable',
-                'risky', 'catch_all' => 'risky',
-                default => 'unknown',
-            },
-            'result' => match($currentStatus) {
-                'valid' => 'valid',
-                'invalid' => 'mailbox_not_found',
-                'spamtrap', 'abuse', 'do_not_mail' => 'blocked',
-                'risky' => 'risky', // Changed: risky status should map to risky result, not catch_all
-                'catch_all' => $isCatchAll ? 'catch_all' : 'risky', // Only catch_all if flag is true
-                default => null,
-            },
-        ];
+        $state = match($currentStatus) {
+            'valid' => 'deliverable',
+            'invalid', 'spamtrap', 'abuse', 'do_not_mail' => 'undeliverable',
+            'risky', 'catch_all' => 'risky',
+            default => 'unknown',
+        };
+        // Map old result values to Emailable reasons
+        $resultValue = match($currentStatus) {
+            'valid' => 'valid',
+            'invalid' => 'mailbox_not_found',
+            'spamtrap', 'abuse', 'do_not_mail' => 'blocked',
+            'risky' => 'risky',
+            'catch_all' => $isCatchAll ? 'catch_all' : 'risky',
+            default => null,
+        };
+        // Map to Emailable reason format
+        $emailableReason = match($currentStatus) {
+            'valid' => 'accepted_email',
+            'invalid' => 'invalid_domain',
+            'spamtrap', 'abuse', 'do_not_mail' => 'invalid_domain',
+            'risky' => 'low_quality',
+            'catch_all' => $isCatchAll ? 'low_deliverability' : 'low_quality',
+            default => null,
+        };
+        return $makeResult($state, $resultValue, $emailableReason);
     }
 }
 

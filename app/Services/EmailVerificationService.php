@@ -71,6 +71,11 @@ class EmailVerificationService
                 $result['score'] = 0;
                 // Save even invalid emails for tracking
                 $this->verificationResultService->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, ['account' => null, 'domain' => null], $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -115,6 +120,7 @@ class EmailVerificationService
                 $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                 $result['state'] = $stateAndResult['state'];
                 $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -132,6 +138,11 @@ class EmailVerificationService
                 $result['checks']['blacklist'] = true; // Update checks array
                 $this->verificationResultService->addDuration($result, $startTime);
                 $this->verificationResultService->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -147,6 +158,11 @@ class EmailVerificationService
                 $result['status'] = $riskChecks['no_reply_status'] ?? 'do_not_mail';
                 $result['score'] = 0;
                 $this->verificationResultService->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -169,8 +185,13 @@ class EmailVerificationService
                     $result['score'] = 0;
                     $result['error'] = 'Typo domain detected (likely spam trap)';
                     $this->verificationResultService->addDuration($result, $startTime);
+                    // Determine state and result before saving
+                    $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                    $result['state'] = $stateAndResult['state'];
+                    $result['result'] = $stateAndResult['result'];
+                    $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                     $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                    return $result;
+                    return $this->verificationResultService->formatResponse($result);
                 }
             }
 
@@ -183,8 +204,13 @@ class EmailVerificationService
                     $result['score'] = 0;
                     $result['error'] = 'ISP/ESP infrastructure domain (not for marketing)';
                     $this->verificationResultService->addDuration($result, $startTime);
+                    // Determine state and result before saving
+                    $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                    $result['state'] = $stateAndResult['state'];
+                    $result['result'] = $stateAndResult['result'];
+                    $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                     $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                    return $result;
+                    return $this->verificationResultService->formatResponse($result);
                 }
             }
 
@@ -212,6 +238,11 @@ class EmailVerificationService
                 $result['status'] = 'do_not_mail';
                 $result['score'] = 0;
                 $this->verificationResultService->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -222,6 +253,11 @@ class EmailVerificationService
                 $result['score'] = 0;
                 $result['error'] = 'Domain does not support SMTP verification';
                 $this->verificationResultService->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -242,6 +278,11 @@ class EmailVerificationService
                 $result['score'] = 0;
                 $result['domain_validity'] = false;
                 $this->verificationResultService->addDuration($result, $startTime);
+                // Determine state and result before saving
+                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                $result['state'] = $stateAndResult['state'];
+                $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -269,6 +310,7 @@ class EmailVerificationService
                 $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                 $result['state'] = $stateAndResult['state'];
                 $result['result'] = $stateAndResult['result'];
+                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                 $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                 return $this->verificationResultService->formatResponse($result);
             }
@@ -415,6 +457,7 @@ class EmailVerificationService
                     $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                     $result['state'] = $stateAndResult['state'];
                     $result['result'] = $stateAndResult['result'];
+                    $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                     $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                     return $this->verificationResultService->formatResponse($result);
                 }
@@ -571,6 +614,7 @@ class EmailVerificationService
                             $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
                             $result['state'] = $stateAndResult['state'];
                             $result['result'] = $stateAndResult['result'];
+                            $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
                             $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
                             return $this->verificationResultService->formatResponse($result);
                         }
@@ -640,6 +684,7 @@ class EmailVerificationService
             $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
             $result['state'] = $stateAndResult['state'];
             $result['result'] = $stateAndResult['result'];
+            $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
 
             // Save to database
             $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
@@ -657,6 +702,7 @@ class EmailVerificationService
             $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
             $result['state'] = $stateAndResult['state'];
             $result['result'] = $stateAndResult['result'];
+            $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
 
             // Try to save even on error
             try {

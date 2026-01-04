@@ -55,7 +55,8 @@ class EmailVerification extends Model
         'account',
         'domain',
         'state', // enum: deliverable, undeliverable, risky, unknown, error
-        'result', // string: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error
+        'result', // string: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error (kept for backward compatibility)
+        'reason', // string: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error (matches Emailable API format)
         'score', // Final score (email_score + ai_confidence if AI is used, otherwise email_score)
         'email_score', // Traditional email verification score (MX, blacklist, SMTP checks, etc.)
         'ai_analysis',
