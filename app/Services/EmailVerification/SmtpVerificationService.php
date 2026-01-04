@@ -73,6 +73,7 @@ class SmtpVerificationService
         $mxConnection = $this->getConcurrentMxConnection($mxRecordsToTry);
         if ($mxConnection === null) {
             // Fallback to sequential if concurrent failed
+            // All connection attempts failed - likely unavailable/timeout/no_connect
             return $this->performSequentialSmtpCheck($mxRecordsToTry, $email);
         }
         
@@ -101,7 +102,8 @@ class SmtpVerificationService
                         $this->domainValidationService->addMxToSkipList($host, 'SMTP handshake failed');
                         @fwrite($socket, "QUIT\r\n");
                         @fclose($socket);
-                        return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
+                        $errorMsg = $handshakeResult['error'] ?? 'SMTP server unavailable';
+                        return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false, 'error' => $errorMsg];
                     }
                     
                     // Try VRFY/EXPN commands first (if enabled)
@@ -200,20 +202,27 @@ class SmtpVerificationService
             @fwrite($socket, "QUIT\r\n");
             @fclose($socket);
             
-            return [
+            $return = [
                 'valid' => $result['valid'] ?? false,
                 'mailbox_full' => $result['mailbox_full'] ?? false,
                 'catch_all' => false,
             ];
+            // Include error if present (for unavailable/timeout/no_connect detection)
+            if (isset($result['error'])) {
+                $return['error'] = $result['error'];
+            }
+            return $return;
             
         } catch (\Exception $e) {
             @fclose($socket);
+            $errorMessage = $e->getMessage();
             Log::warning('SMTP check failed', [
                 'email' => $email,
                 'domain' => $domain,
-                'error' => $e->getMessage(),
+                'error' => $errorMessage,
             ]);
-            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
+            // Include error message so it can be detected as unavailable/timeout/no_connect
+            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false, 'error' => $errorMessage];
         }
     }
 
@@ -403,7 +412,8 @@ class SmtpVerificationService
             // Read greeting with timeout check
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
-                return ['success' => false];
+                $errorMsg = $isTimeout() ? 'SMTP operation timeout' : 'SMTP server unavailable';
+                return ['success' => false, 'error' => $errorMsg];
             }
             
             // EHLO with configurable hostname
@@ -411,7 +421,8 @@ class SmtpVerificationService
             @fwrite($socket, "EHLO {$heloHostname}\r\n");
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                return ['success' => false];
+                $errorMsg = $isTimeout() ? 'SMTP operation timeout' : 'SMTP server unavailable';
+                return ['success' => false, 'error' => $errorMsg];
             }
             
             // Read all EHLO responses (multi-line) with timeout protection
@@ -429,7 +440,8 @@ class SmtpVerificationService
             @fwrite($socket, "MAIL FROM: <noreply@".gethostname().">\r\n");
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
-                return ['success' => false];
+                $errorMsg = $isTimeout() ? 'SMTP operation timeout' : 'SMTP server unavailable';
+                return ['success' => false, 'error' => $errorMsg];
             }
             
             return ['success' => true];
@@ -439,7 +451,13 @@ class SmtpVerificationService
                 'host' => $host,
                 'error' => $e->getMessage(),
             ]);
-            return ['success' => false];
+            $errorMessage = $e->getMessage();
+            if (str_contains(strtolower($errorMessage), 'timeout')) {
+                $errorMessage = 'SMTP operation timeout';
+            } elseif (str_contains(strtolower($errorMessage), 'connection')) {
+                $errorMessage = 'SMTP server unavailable';
+            }
+            return ['success' => false, 'error' => $errorMessage];
         }
     }
 
@@ -462,7 +480,8 @@ class SmtpVerificationService
             $response = @fgets($socket, 515);
             
             if (!$response || $isTimeout()) {
-                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
+                $errorMsg = $isTimeout() ? 'SMTP operation timeout' : 'SMTP server unavailable';
+                return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null, 'error' => $errorMsg];
             }
             
             // Analyze SMTP response
@@ -498,7 +517,13 @@ class SmtpVerificationService
                 'email' => $email,
                 'error' => $e->getMessage(),
             ]);
-            return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null];
+            $errorMessage = $e->getMessage();
+            if (str_contains(strtolower($errorMessage), 'timeout')) {
+                $errorMessage = 'SMTP operation timeout';
+            } elseif (str_contains(strtolower($errorMessage), 'connection')) {
+                $errorMessage = 'SMTP server unavailable';
+            }
+            return ['valid' => false, 'mailbox_full' => false, 'rejected' => true, 'code' => null, 'error' => $errorMessage];
         }
     }
 
@@ -508,6 +533,7 @@ class SmtpVerificationService
     private function performSequentialSmtpCheck(array $mxRecordsToTry, string $email): array
     {
         $mailboxFull = false;
+        $lastError = null;
         
         foreach ($mxRecordsToTry as $mx) {
             $host = $mx['host'];
@@ -525,6 +551,11 @@ class SmtpVerificationService
                     $mailboxFull = true;
                 }
                 
+                // Track error message if present
+                if (isset($result['error'])) {
+                    $lastError = $result['error'];
+                }
+                
                 // If connection failed, add to skip list (if auto-add enabled)
                 if ($attempt === $retries - 1) {
                     $this->domainValidationService->addMxToSkipList($host, 'SMTP connection failed');
@@ -536,8 +567,16 @@ class SmtpVerificationService
                 }
             }
         }
-
-        return ['valid' => false, 'mailbox_full' => $mailboxFull, 'catch_all' => false];
+        
+        // Return with error message if available (for unavailable/timeout/no_connect detection)
+        $return = ['valid' => false, 'mailbox_full' => $mailboxFull, 'catch_all' => false];
+        if ($lastError) {
+            $return['error'] = $lastError;
+        } else {
+            // If no error was set but all attempts failed, likely connection issue
+            $return['error'] = 'SMTP server unavailable';
+        }
+        return $return;
     }
 
     /**
@@ -552,7 +591,16 @@ class SmtpVerificationService
         
         if (!$socket) {
             $this->domainValidationService->addMxToSkipList($host, 'SMTP connection failed');
-            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
+            // Determine error type based on errno/errstr
+            $errorMsg = $errstr ?: 'Could not connect to SMTP server';
+            if (str_contains(strtolower($errorMsg), 'timeout') || $errno === 110) {
+                $errorMsg = 'Connection timeout';
+            } elseif (str_contains(strtolower($errorMsg), 'refused') || $errno === 111) {
+                $errorMsg = 'Connection refused - SMTP server unavailable';
+            } else {
+                $errorMsg = 'SMTP server unavailable';
+            }
+            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false, 'error' => $errorMsg];
         }
 
         try {
@@ -567,7 +615,8 @@ class SmtpVerificationService
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '220')) {
                 @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
+                $errorMsg = $isTimeout() ? 'SMTP operation timeout' : 'SMTP server unavailable';
+                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false, 'error' => $errorMsg];
             }
 
             // EHLO
@@ -576,7 +625,8 @@ class SmtpVerificationService
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
                 @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
+                $errorMsg = $isTimeout() ? 'SMTP operation timeout' : 'SMTP server unavailable';
+                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false, 'error' => $errorMsg];
             }
 
             // Read all EHLO responses
@@ -595,7 +645,8 @@ class SmtpVerificationService
             $response = @fgets($socket, 515);
             if ($isTimeout() || !$response || !str_starts_with($response, '250')) {
                 @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
+                $errorMsg = $isTimeout() ? 'SMTP operation timeout' : 'SMTP server unavailable';
+                return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false, 'error' => $errorMsg];
             }
 
             // RCPT TO
@@ -605,7 +656,8 @@ class SmtpVerificationService
             if (!$response || $isTimeout()) {
                 @fwrite($socket, "QUIT\r\n");
                 @fclose($socket);
-                return ['valid' => false, 'mailbox_full' => false];
+                $errorMsg = $isTimeout() ? 'SMTP operation timeout' : 'SMTP server unavailable';
+                return ['valid' => false, 'mailbox_full' => false, 'error' => $errorMsg];
             }
             
             // Analyze SMTP response
@@ -634,7 +686,7 @@ class SmtpVerificationService
                         $this->domainValidationService->addMxToSkipList($host, "SMTP error: {$pattern}", trim($response));
                         @fwrite($socket, "QUIT\r\n");
                         @fclose($socket);
-                        return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
+                        return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false, 'error' => 'SMTP server unavailable'];
                     }
                 }
             }
@@ -643,15 +695,39 @@ class SmtpVerificationService
             @fwrite($socket, "QUIT\r\n");
             @fclose($socket);
 
-            return [
+            $return = [
                 'valid' => $responseAnalysis['is_valid'],
                 'mailbox_full' => $responseAnalysis['is_mailbox_full'] ?? false,
                 'catch_all' => false,
             ];
+            
+            // Store rejection info if mailbox doesn't exist (550 = rejected_email, not unavailable)
+            // Only set error if it's connection/timeout issue, not mailbox rejection
+            if (!$responseAnalysis['is_valid'] && !isset($responseAnalysis['is_greylisting'])) {
+                // Check if it's a rejection (550 = mailbox not found) vs connection issue
+                if (($responseAnalysis['code'] ?? 0) === 550) {
+                    // 550 = mailbox rejected (rejected_email), not connection issue
+                    // Don't set error - this should be detected as rejected_email, not unavailable_smtp
+                } else {
+                    // Other codes or timeout = connection/unavailable issue
+                    if (isset($responseAnalysis['timeout']) && $responseAnalysis['timeout']) {
+                        $return['error'] = 'SMTP operation timeout';
+                    }
+                }
+            }
+            
+            return $return;
 
         } catch (\Exception $e) {
             @fclose($socket);
-            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false];
+            $errorMessage = $e->getMessage();
+            // Check if it's a timeout or connection error
+            if (str_contains(strtolower($errorMessage), 'timeout')) {
+                $errorMessage = 'SMTP operation timeout';
+            } elseif (str_contains(strtolower($errorMessage), 'connection')) {
+                $errorMessage = 'SMTP server unavailable';
+            }
+            return ['valid' => false, 'mailbox_full' => false, 'catch_all' => false, 'error' => $errorMessage];
         }
     }
 

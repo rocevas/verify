@@ -318,7 +318,7 @@ class AiEmailVerificationService
                         // Calculate final score by blending email_score and AI confidence
                         $emailScore = $result['email_score'] ?? 0;
                         $aiConfidence = $aiResult['confidence'];
-                        
+
                         // For public providers with MX records, ensure high final score
                         if ($isPublicProvider && ($result['mx_record'] ?? false)) {
                             // Public provider with MX records should have high final score (90-100)
@@ -904,7 +904,7 @@ Focus on:
         $currentStatus = $result['status'] ?? 'unknown';
         $error = $result['error'] ?? null;
 
-        // Helper function to return state, result (backward compat), and reason (Emailable format)
+        // Helper function to return state, result (backward compat), and reason
         $makeResult = function($state, $resultValue, $emailableReason) {
             return [
                 'state' => $state,

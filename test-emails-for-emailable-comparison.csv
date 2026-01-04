@@ -1,0 +1,101 @@
+email,notes
+sarunas@rocevas.lt,Valid business email - should be 100
+test@example.com,Role-based + invalid domain - should be 0
+admin@example.com,Role-based - should be 0
+postmaster@example.com,Role-based - should be 0
+abuse@example.com,Role-based - should be 0
+webmaster@example.com,Role-based - should be 0
+info@example.com,Role-based - should be risky
+contact@example.com,Role-based - should be risky
+noemail@foryou.com,Invalid domain - should be 0
+spamtrap@test.com,Invalid/spamtrap - should be 0
+test@[192.168.1.1],Invalid IP format - should be 0
+noreply@example.com,No-reply - should be 0
+donotreply@test.com,No-reply - should be 0
+mailer-daemon@example.com,Role-based - should be 0
+root@example.com,Role-based - should be 0
+sales@example.com,Role-based business - should be risky
+support@example.com,Role-based business - should be risky
+help@test.com,Role-based - should be risky
+marketing@example.com,Role-based business - should be risky
+newsletter@test.com,Role-based - should be risky
+unsubscribe@test.com,Role-based - should be risky
+remove@test.com,Role-based - should be risky
+feedback@example.com,Role-based - should be risky
+service@example.com,Role-based - should be risky
+customer@test.com,Role-based - should be risky
+client@example.com,Role-based - should be risky
+partner@test.com,Role-based - should be risky
+hr@example.com,Role-based - should be risky
+pleasedont@emailme.com,Invalid domain - should be 0
+invalid@nonexistentdomain12345.com,Invalid domain - should be 0
+typo@gmial.com,Typo domain (gmail) - should be 0
+typo@yahooo.com,Typo domain (yahoo) - should be 0
+typo@outlok.com,Typo domain (outlook) - should be 0
+typo@yaho.com,Typo domain (yahoo) - should be 0
+typo@hotmial.com,Typo domain (hotmail) - should be low score
+typo@gmai.com,Typo domain (gmail) - should be low score
+catch-all@test-domain.com,Catch-all test - should be risky
+disposable@10minutemail.com,Disposable - should be 0
+temp@guerrillamail.com,Disposable - should be low score
+throwaway@mailinator.com,Disposable - should be low score
+invalid@domain.invalid,Invalid domain - should be 0
+similar1@gmail.com,Free provider rejected - should be 0
+test-email@gmail.com,Free provider rejected - should be 0
+test_email@gmail.com,Free provider - should check score
+firstname_lastname@yahoo.com,Free provider - should check score
+common.name@outlook.com,Free provider - should check score
+common-name@outlook.com,Free provider - should check score
+firstname-lastname@yahoo.com,Free provider - should check score
+test123@gmail.com,Free with numbers + mailbox_full - score 43
+example@aol.com,Free provider - score 68
+test.email@gmail.com,Free with dots + mailbox_full - score 47
+testemail@gmail.com,Free simple + mailbox_full - score 47
+testemail123@gmail.com,Free with numbers + mailbox_full - score 44
+test.email.123@gmail.com,Free with dots and numbers + mailbox_full - score 44
+user.name+tag@gmail.com,Free with alias + mailbox_full - score 45
+user.name+test@gmail.com,Free with alias + mailbox_full - score 45
+firstname.lastname@yahoo.com,Free with dots - score 68
+sarunas@rocketappz.com,Catch-all accept-all - score 60 risky
+user@hotmail.com,Free provider valid - score 85
+test.user@outlook.com,Free provider valid - score 85
+similar2@gmail.com,Free provider valid - score 93
+similar3@gmail.com,Free provider valid - score 93
+common_name@outlook.com,Free provider valid - score 85
+john.doe@example.com,Business email - should be high score
+jane.smith@company.com,Business email - should be high score
+contact@business.com,Business role-based - should be risky
+info@corporation.com,Business role-based - should be risky
+sales@enterprise.com,Business role-based - should be risky
+hello@startup.io,Business email - should be high score
+support@saas.com,Business role-based - should be risky
+marketing@brand.com,Business role-based - should be risky
+no-reply@company.com,Business no-reply - should be 0
+noreply@business.com,Business no-reply - should be 0
+test123@domain.com,Business with numbers - check score impact
+test456@company.com,Business with numbers - check score impact
+user123@enterprise.com,Business with numbers - check score impact
+abc123@business.com,Business with numbers - check score impact
+test@test.com,Test domain - should check behavior
+admin@test.com,Test role-based - should be risky
+info@test.com,Test role-based - should be risky
+webmaster@test.com,Test role-based - should be risky
+postmaster@test.com,Test role-based - should be risky
+abuse@test.com,Test role-based - should be risky
+test1234@test.com,Test with many numbers - check penalty
+test5678@test.com,Test with many numbers - check penalty
+abcdef@test.com,Test alphabetical only - check score
+xyzabc@test.com,Test alphabetical only - check score
+test@subdomain.example.com,Subdomain - should check behavior
+user@mail.example.com,Subdomain mail server - should check
+info@email.company.com,Subdomain email server - should check
+test@co.uk,Short domain - should check
+user@io,Short TLD - should check
+admin@com,Invalid short - should be 0
+test@123.com,Number domain - should check
+user@test123.com,Number in domain - should check
+hello@world,Invalid no TLD - should be 0
+test@localhost,Invalid localhost - should be 0
+user@invalid,Invalid no domain - should be 0
+
+

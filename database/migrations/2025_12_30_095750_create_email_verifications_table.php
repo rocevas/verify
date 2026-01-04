@@ -20,7 +20,7 @@ return new class extends Migration
             $table->foreignId('bulk_verification_job_id')->nullable()->constrained('bulk_verification_jobs')->nullOnDelete();
             $table->enum('state', ['deliverable', 'undeliverable', 'risky', 'unknown', 'error'])->default('unknown')->comment('deliverable, undeliverable, risky, unknown, error');
             $table->string('result')->nullable()->comment('Result: valid, syntax_error, typo, mailbox_not_found, disposable, blocked, catch_all, mailbox_full, role, error');
-            $table->string('reason')->nullable()->comment('Reason: accepted_email, invalid_email, invalid_domain, rejected_email, invalid_smtp, low_quality, low_deliverability, no_connect, timeout, unavailable_smtp, unexpected_error (matches Emailable API format)');
+            $table->string('reason')->nullable()->comment('Reason: accepted_email, invalid_email, invalid_domain, rejected_email, invalid_smtp, low_quality, low_deliverability, no_connect, timeout, unavailable_smtp, unexpected_error');
 
             $table->integer('score')->nullable();
             $table->integer('email_score')->nullable();
@@ -28,6 +28,11 @@ return new class extends Migration
             $table->string('email')->index();
             $table->string('account')->nullable();
             $table->string('domain')->nullable();
+
+            // Email attributes
+            $table->integer('numerical_characters')->default(0)->comment('Number of numerical characters in email local part');
+            $table->integer('alphabetical_characters')->default(0)->comment('Number of alphabetical characters in email local part');
+            $table->integer('unicode_symbols')->default(0)->comment('Number of Unicode symbols in email local part');
 
             $table->boolean('ai_analysis')->default(false);
             $table->integer('ai_confidence')->nullable();
@@ -51,6 +56,12 @@ return new class extends Migration
 
             $table->string('did_you_mean')->nullable();
             $table->string('alias_of')->nullable()->comment('Canonical email address if this is an alias');
+
+            // MX and SMTP information
+            $table->string('mx_record_string')->nullable()->comment('First MX record hostname (e.g., route3.mx.cloudflare.net)');
+            $table->string('smtp_provider')->nullable()->comment('SMTP provider name (e.g., Cloudflare, Google, Microsoft)');
+            $table->boolean('implicit_mx_record')->default(false)->comment('Whether domain uses implicit MX (falls back to A record)');
+            $table->boolean('secure_email_gateway')->default(false)->comment('Whether email uses Secure Email Gateway (SEG)');
 
             $table->timestamp('verified_at')->nullable();
             $table->decimal('duration', 10, 2)->nullable()->comment('Verification duration in milliseconds');

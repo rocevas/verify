@@ -1,0 +1,52 @@
+email,category,expected_score_range,notes
+testemail123@gmail.com,free_with_numbers,40-50,Free provider, 3 numbers, mailbox full expected
+user@hotmail.com,free_catch_all,80-90,Free provider, catch-all, no numbers
+similar2@gmail.com,free_catch_all_numbers,90-95,Free provider, catch-all, 1 number
+sales@enterprise.com,role_catch_all,40-45,Role-based, catch-all, non-free
+hello@startup.io,role_domain,65-75,Role-based, valid domain
+test123@domain.com,role_numbers,60-70,Role-based, 3 numbers, 4 alphabetical
+user123@enterprise.com,catch_all_numbers,50-60,Catch-all, 3 numbers, 4 alphabetical
+typo@hotmial.com,typo_valid,4-5,Typo domain that exists
+temp@guerrillamail.com,disposable_valid,5-5,Disposable domain that exists
+firstname-lastname@yahoo.com,disposable_free,4-5,Disposable, free provider
+test.email@gmail.com,free_alias,45-50,Free provider, alias (tag), mailbox full
+testemail@gmail.com,free_mailbox_full,45-50,Free provider, mailbox full
+testemail123@gmail.com,free_numbers_mailbox_full,43-47,Free provider, 3 numbers, mailbox full
+user.name+tag@gmail.com,free_tag,45-50,Free provider, tag (alias), mailbox full
+user.name+test@gmail.com,free_tag_mailbox_full,45-50,Free provider, tag, mailbox full
+firstname.lastname@yahoo.com,free_yahoo,65-75,Free provider, yahoo.com
+example@aol.com,free_aol,65-75,Free provider, aol.com, other factor
+test.user@outlook.com,free_outlook_smtp,80-90,Free provider, SMTP passed
+common_name@outlook.com,free_outlook_smtp,80-90,Free provider, SMTP passed
+john.doe@example.com,invalid_domain,0-0,Invalid domain (example.com doesn't accept mail)
+jane.smith@company.com,invalid_domain,0-0,Invalid domain
+contact@business.com,rejected_smtp,0-0,Valid domain, SMTP rejected
+info@corporation.com,invalid_domain,0-0,Invalid domain
+marketing@brand.com,invalid_domain,0-0,Invalid domain
+no-reply@company.com,invalid_domain,0-0,Invalid domain
+noreply@business.com,rejected_smtp,0-0,Valid domain, SMTP rejected
+test1234@test.com,invalid_domain,0-0,Invalid domain
+test5678@test.com,invalid_domain,0-0,Invalid domain
+admin@test.com,invalid_domain,0-0,Invalid domain
+info@test.com,invalid_domain,0-0,Invalid domain
+webmaster@test.com,invalid_domain,0-0,Invalid domain
+sarunas@rocevas.lt,valid_non_free,95-100,Valid non-free domain, SMTP passed
+sarunas@rocketappz.com,catch_all_non_free,55-65,Catch-all, non-free, risky
+contact@saas.com,unavailable_smtp,unknown,Valid domain, SMTP unavailable
+support@saas.com,unavailable_smtp,unknown,Valid domain, SMTP unavailable
+test@subdomain.example.com,invalid_domain,0-0,Invalid subdomain
+user@mail.example.com,invalid_domain,0-0,Invalid domain
+info@email.company.com,invalid_domain,0-0,Invalid domain
+test@co.uk,invalid_domain,0-0,Invalid domain
+test@123.com,invalid_domain,0-0,Invalid domain
+user@test123.com,invalid_domain,0-0,Invalid domain
+abc123@business.com,rejected_smtp,0-0,Valid domain, SMTP rejected
+testemail456@gmail.com,free_numbers,40-50,Free provider, 3 numbers, mailbox full expected
+first.last@yahoo.com,free_yahoo_name,65-75,Free provider, yahoo.com, name format
+user.email@gmail.com,free_alias_format,45-50,Free provider, alias format, mailbox full
+test.email.123@gmail.com,free_alias_numbers,43-47,Free provider, alias, 3 numbers, mailbox full
+manager@enterprise.com,role_enterprise,40-45,Role-based, catch-all, enterprise.com
+hr@enterprise.com,role_enterprise,40-45,Role-based, catch-all, enterprise.com
+info@startup.io,role_startup,65-75,Role-based, startup.io domain
+contact@startup.io,role_startup,65-75,Role-based, startup.io domain
+

@@ -79,6 +79,13 @@ class EmailVerification extends Model
         'gravatar',
         'did_you_mean',
         'alias_of',
+        'numerical_characters',
+        'alphabetical_characters',
+        'unicode_symbols',
+        'mx_record_string',
+        'smtp_provider',
+        'implicit_mx_record',
+        'secure_email_gateway',
         'verified_at',
         'duration', // Verification duration in seconds (rounded to 2 decimal places)
     ];
@@ -99,6 +106,8 @@ class EmailVerification extends Model
         'isp_esp' => 'boolean',
         'government_tld' => 'boolean',
         'gravatar' => 'boolean',
+        'implicit_mx_record' => 'boolean',
+        'secure_email_gateway' => 'boolean',
         'ai_risk_factors' => 'array',
         'verified_at' => 'datetime',
     ];
