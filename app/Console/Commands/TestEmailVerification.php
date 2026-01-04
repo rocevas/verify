@@ -106,6 +106,23 @@ class TestEmailVerification extends Command
                 $this->newLine();
             }
             
+            // DMARC info
+            if (isset($result['dmarc'])) {
+                $this->info("DMARC:");
+                if (isset($result['dmarc']['policy'])) {
+                    $this->line("  Policy: " . $result['dmarc']['policy']);
+                } else {
+                    $this->line("  Policy: Not found or check failed");
+                }
+                if (isset($result['dmarc_confidence_boost'])) {
+                    $this->line("  Confidence Boost: +" . $result['dmarc_confidence_boost']);
+                }
+                if (isset($result['dmarc']['error'])) {
+                    $this->line("  Error: " . $result['dmarc']['error']);
+                }
+                $this->newLine();
+            }
+            
             // AI info
             if (isset($result['ai_analysis']) && $result['ai_analysis']) {
                 $this->info("AI Analysis:");

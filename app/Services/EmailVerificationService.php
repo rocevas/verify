@@ -1160,7 +1160,8 @@ class EmailVerificationService
                 if ($result['mx_record']) {
                     // Public providers are catch-all, so mark as catch_all status (not valid)
                     // This matches the behavior for other catch-all servers
-                    $result['status'] = 'catch_all'; // Public providers are catch-all servers
+                    $result['status'] = config('email-verification.catch_all_status', 'catch_all'); // Public providers are catch-all servers
+                    $result['catch_all'] = true; // Set catch-all flag
                     $result['smtp'] = false; // Not checked (public providers block SMTP checks)
                     $result['checks']['smtp'] = false; // Update checks array
                     $result['mailbox_full'] = false; // Not checked (public providers are assumed to have space)
@@ -1196,6 +1197,82 @@ class EmailVerificationService
                                 'error' => $e->getMessage(),
                             ]);
                             $result['gravatar'] = false;
+                        }
+                    }
+                    
+                    // Check DMARC for catch-all emails (helps determine email confidence)
+                    // If DMARC policy = "reject" → more likely email is real
+                    // If DMARC policy = "quarantine" → somewhat likely email is real
+                    if (config('email-verification.enable_dmarc_check', true)) {
+                        try {
+                            $dmarcService = app(DmarcCheckService::class);
+                            $dmarcResult = $dmarcService->checkDomain($parts['domain']);
+                            
+                            if (!$dmarcResult['has_issue'] && isset($dmarcResult['details']['parsed'])) {
+                                $parsed = $dmarcResult['details']['parsed'];
+                                $dmarcPolicy = $parsed['p'] ?? null;
+                                
+                                // Store DMARC info
+                                $result['dmarc'] = [
+                                    'policy' => $dmarcPolicy,
+                                    'record' => $dmarcResult['details']['record'] ?? null,
+                                    'parsed' => $parsed,
+                                ];
+                                
+                                // Add confidence boost based on DMARC policy
+                                $weights = $this->getScoreWeights();
+                                $dmarcBonus = 0;
+                                
+                                if ($dmarcPolicy === 'reject') {
+                                    // DMARC reject policy = more likely email is real (strict security)
+                                    $dmarcBonus = $weights['dmarc_reject_bonus'] ?? 10;
+                                    Log::debug('DMARC reject policy detected - higher confidence', [
+                                        'email' => $email,
+                                        'domain' => $parts['domain'],
+                                    ]);
+                                } elseif ($dmarcPolicy === 'quarantine') {
+                                    // DMARC quarantine policy = somewhat likely email is real
+                                    $dmarcBonus = $weights['dmarc_quarantine_bonus'] ?? 5;
+                                    Log::debug('DMARC quarantine policy detected - moderate confidence', [
+                                        'email' => $email,
+                                        'domain' => $parts['domain'],
+                                    ]);
+                                } elseif ($dmarcPolicy === 'none') {
+                                    // DMARC none policy = no additional confidence
+                                    $dmarcBonus = 0;
+                                    Log::debug('DMARC none policy detected - no confidence boost', [
+                                        'email' => $email,
+                                        'domain' => $parts['domain'],
+                                    ]);
+                                }
+                                
+                                if ($dmarcBonus > 0) {
+                                    $result['score'] = min(100, max(0, $result['score'] + $dmarcBonus)); // Clamp to 0-100
+                                    $result['dmarc_confidence_boost'] = $dmarcBonus;
+                                }
+                            } else {
+                                // DMARC check failed or no record - no confidence boost
+                                $result['dmarc'] = [
+                                    'policy' => null,
+                                    'error' => $dmarcResult['message'] ?? 'DMARC check failed',
+                                ];
+                                Log::debug('DMARC check failed or no record', [
+                                    'email' => $email,
+                                    'domain' => $parts['domain'],
+                                    'error' => $dmarcResult['message'] ?? 'Unknown error',
+                                ]);
+                            }
+                        } catch (\Exception $e) {
+                            // Fail gracefully - if DMARC check fails, just continue without it
+                            Log::debug('DMARC check failed for catch-all email', [
+                                'email' => $email,
+                                'domain' => $parts['domain'],
+                                'error' => $e->getMessage(),
+                            ]);
+                            $result['dmarc'] = [
+                                'policy' => null,
+                                'error' => $e->getMessage(),
+                            ];
                         }
                     }
                     
@@ -1267,7 +1344,83 @@ class EmailVerificationService
                                 }
                             }
                             
-                            // Recalculate score after Gravatar check (if applicable)
+                            // Check DMARC for catch-all emails (helps determine email confidence)
+                            // If DMARC policy = "reject" → more likely email is real
+                            // If DMARC policy = "quarantine" → somewhat likely email is real
+                            if (config('email-verification.enable_dmarc_check', true)) {
+                                try {
+                                    $dmarcService = app(DmarcCheckService::class);
+                                    $dmarcResult = $dmarcService->checkDomain($parts['domain']);
+                                    
+                                    if (!$dmarcResult['has_issue'] && isset($dmarcResult['details']['parsed'])) {
+                                        $parsed = $dmarcResult['details']['parsed'];
+                                        $dmarcPolicy = $parsed['p'] ?? null;
+                                        
+                                        // Store DMARC info
+                                        $result['dmarc'] = [
+                                            'policy' => $dmarcPolicy,
+                                            'record' => $dmarcResult['details']['record'] ?? null,
+                                            'parsed' => $parsed,
+                                        ];
+                                        
+                                        // Add confidence boost based on DMARC policy
+                                        $weights = $this->getScoreWeights();
+                                        $dmarcBonus = 0;
+                                        
+                                        if ($dmarcPolicy === 'reject') {
+                                            // DMARC reject policy = more likely email is real (strict security)
+                                            $dmarcBonus = $weights['dmarc_reject_bonus'] ?? 10;
+                                            Log::debug('DMARC reject policy detected - higher confidence', [
+                                                'email' => $email,
+                                                'domain' => $parts['domain'],
+                                            ]);
+                                        } elseif ($dmarcPolicy === 'quarantine') {
+                                            // DMARC quarantine policy = somewhat likely email is real
+                                            $dmarcBonus = $weights['dmarc_quarantine_bonus'] ?? 5;
+                                            Log::debug('DMARC quarantine policy detected - moderate confidence', [
+                                                'email' => $email,
+                                                'domain' => $parts['domain'],
+                                            ]);
+                                        } elseif ($dmarcPolicy === 'none') {
+                                            // DMARC none policy = no additional confidence
+                                            $dmarcBonus = 0;
+                                            Log::debug('DMARC none policy detected - no confidence boost', [
+                                                'email' => $email,
+                                                'domain' => $parts['domain'],
+                                            ]);
+                                        }
+                                        
+                                        if ($dmarcBonus > 0) {
+                                            $result['score'] = min(100, max(0, $result['score'] + $dmarcBonus)); // Clamp to 0-100
+                                            $result['dmarc_confidence_boost'] = $dmarcBonus;
+                                        }
+                                    } else {
+                                        // DMARC check failed or no record - no confidence boost
+                                        $result['dmarc'] = [
+                                            'policy' => null,
+                                            'error' => $dmarcResult['message'] ?? 'DMARC check failed',
+                                        ];
+                                        Log::debug('DMARC check failed or no record', [
+                                            'email' => $email,
+                                            'domain' => $parts['domain'],
+                                            'error' => $dmarcResult['message'] ?? 'Unknown error',
+                                        ]);
+                                    }
+                                } catch (\Exception $e) {
+                                    // Fail gracefully - if DMARC check fails, just continue without it
+                                    Log::debug('DMARC check failed for catch-all email', [
+                                        'email' => $email,
+                                        'domain' => $parts['domain'],
+                                        'error' => $e->getMessage(),
+                                    ]);
+                                    $result['dmarc'] = [
+                                        'policy' => null,
+                                        'error' => $e->getMessage(),
+                                    ];
+                                }
+                            }
+                            
+                            // Recalculate score after Gravatar and DMARC checks (if applicable)
                             $result['score'] = $this->calculateScore($result['checks']);
                             
                             $result['error'] = 'Catch-all server detected';
@@ -1418,6 +1571,7 @@ class EmailVerificationService
             'did_you_mean' => $result['did_you_mean'] ?? $result['typoSuggestion'] ?? $result['typo_suggestion'] ?? null,
             'free' => $result['free'] ?? $result['is_free'] ?? false,
             'mailbox_full' => $result['mailbox_full'] ?? false,
+            'catch_all' => $result['catch_all'] ?? false,
         ];
         
         // Add Gravatar fields if present (for catch-all emails)
@@ -1426,6 +1580,22 @@ class EmailVerificationService
             if (isset($result['gravatar_url'])) {
                 $formatted['gravatar_url'] = $result['gravatar_url'];
             }
+        }
+        
+        // Add DMARC fields if present (for catch-all emails)
+        if (isset($result['dmarc'])) {
+            $formatted['dmarc'] = $result['dmarc'];
+            if (isset($result['dmarc_confidence_boost'])) {
+                $formatted['dmarc_confidence_boost'] = $result['dmarc_confidence_boost'];
+            }
+        }
+        
+        // Add VRFY/EXPN verification method if present
+        if (isset($result['verification_method'])) {
+            $formatted['verification_method'] = $result['verification_method'];
+        }
+        if (isset($result['smtp_confidence'])) {
+            $formatted['smtp_confidence'] = $result['smtp_confidence'];
         }
 
         // Only include error if present

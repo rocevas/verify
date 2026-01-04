@@ -174,6 +174,8 @@ return [
         'mailbox_full_penalty' => 30, // Penalty if mailbox is full (email cannot receive mail)
         'free_email_penalty' => 0, // Small penalty for free email providers (disabled - no penalty)
         'gravatar_bonus' => 5, // Bonus if email has Gravatar (for catch-all emails) - matches gravatar_score_bonus
+        'dmarc_reject_bonus' => 10, // Bonus if DMARC policy = "reject" (for catch-all emails) - higher confidence
+        'dmarc_quarantine_bonus' => 5, // Bonus if DMARC policy = "quarantine" (for catch-all emails) - moderate confidence
         'government_tld_penalty' => 10, // Penalty for government TLDs (reduces score but doesn't zero it)
     ],
 
@@ -927,6 +929,27 @@ return [
 
     'enable_gravatar_check' => env('EMAIL_VERIFICATION_GRAVATAR_CHECK', true),
     // Note: gravatar_score_bonus moved to score_weights['gravatar_bonus'] for consistency
+
+    /*
+    |--------------------------------------------------------------------------
+    | DMARC Check for Catch-All Emails
+    |--------------------------------------------------------------------------
+    |
+    | Enable DMARC check for catch-all email addresses to determine
+    | email confidence based on DMARC policy.
+    |
+    | If DMARC policy = "reject" → higher confidence (email more likely real)
+    | If DMARC policy = "quarantine" → moderate confidence
+    | If DMARC policy = "none" → no confidence boost
+    |
+    | This adds score bonus based on DMARC policy:
+    | - reject: +10 points (default)
+    | - quarantine: +5 points (default)
+    | - none: +0 points
+    |
+    */
+
+    'enable_dmarc_check' => env('EMAIL_VERIFICATION_DMARC_CHECK', true),
 
     /*
     |--------------------------------------------------------------------------
