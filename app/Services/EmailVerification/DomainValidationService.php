@@ -106,71 +106,96 @@ class DomainValidationService
         $cacheKey = "domain_validity_{$domain}";
         $ttl = config('email-verification.domain_validity_cache_ttl', 3600);
         
-        return Cache::remember($cacheKey, $ttl, function () use ($domain) {
-            // Set DNS timeout to prevent hanging
-            $originalTimeout = ini_get('default_socket_timeout');
-            ini_set('default_socket_timeout', 3); // 3 seconds max for DNS
-            
-            try {
-                // 1. DNS Resolution Check (A record)
-                $resolvedIp = @gethostbyname($domain);
-                if ($resolvedIp === $domain || !filter_var($resolvedIp, FILTER_VALIDATE_IP)) {
-                    // Domain does not resolve to IP
-                    return [
-                        'valid' => false,
-                        'status' => 'invalid',
-                        'error' => 'Domain does not exist (DNS resolution failed)',
-                        'reason' => 'dns_resolution_failed',
-                    ];
-                }
+        try {
+            return Cache::remember($cacheKey, $ttl, function () use ($domain) {
+                // Set DNS timeout to prevent hanging
+                $originalTimeout = ini_get('default_socket_timeout');
+                ini_set('default_socket_timeout', 3); // 3 seconds max for DNS
                 
-                // 2. Check if domain has A record (not just CNAME)
-                if (function_exists('dns_get_record')) {
-                    $dnsRecords = @dns_get_record($domain, DNS_A | DNS_AAAA);
-                    if (empty($dnsRecords)) {
-                        // No A or AAAA records found
+                try {
+                    // 1. DNS Resolution Check (A record)
+                    $resolvedIp = @gethostbyname($domain);
+                    if ($resolvedIp === $domain || !filter_var($resolvedIp, FILTER_VALIDATE_IP)) {
+                        // Domain does not resolve to IP
                         return [
                             'valid' => false,
                             'status' => 'invalid',
-                            'error' => 'Domain has no A or AAAA records',
-                            'reason' => 'no_a_record',
+                            'error' => 'Domain does not exist (DNS resolution failed)',
+                            'reason' => 'dns_resolution_failed',
                         ];
                     }
-                }
-                
-                // 3. HTTP Redirect Detection (optional, can be disabled for performance)
-                if (config('email-verification.check_domain_redirect', false)) {
-                    $redirectCheck = $this->checkDomainRedirect($domain);
-                    if ($redirectCheck['is_redirect']) {
-                        return [
-                            'valid' => false,
-                            'status' => 'risky',
-                            'error' => 'Domain redirects to another domain (possible spam trap)',
-                            'reason' => 'domain_redirect',
-                            'redirect_to' => $redirectCheck['redirect_to'] ?? null,
-                        ];
+                    
+                    // 2. Check if domain has A record (not just CNAME)
+                    // Note: If gethostbyname succeeded, domain likely has A record
+                    // dns_get_record might fail due to timeout or network issues, so treat as optional check
+                    if (function_exists('dns_get_record')) {
+                        try {
+                            // Set timeout for dns_get_record to prevent hanging
+                            $dnsRecords = @dns_get_record($domain, DNS_A | DNS_AAAA);
+                            if (empty($dnsRecords)) {
+                                // If gethostbyname succeeded but dns_get_record returns empty,
+                                // it might be a network/DNS server issue, not necessarily invalid domain
+                                // Since gethostbyname already resolved IP, consider domain valid
+                                // Log warning but don't fail
+                                Log::debug('dns_get_record returned empty but gethostbyname succeeded', [
+                                    'domain' => $domain,
+                                    'resolved_ip' => $resolvedIp,
+                                ]);
+                                // Continue - domain is valid if gethostbyname succeeded
+                            }
+                        } catch (\Exception $e) {
+                            // If dns_get_record fails, but gethostbyname succeeded, domain is likely valid
+                            Log::debug('dns_get_record failed but gethostbyname succeeded', [
+                                'domain' => $domain,
+                                'resolved_ip' => $resolvedIp,
+                                'error' => $e->getMessage(),
+                            ]);
+                            // Continue - domain is valid if gethostbyname succeeded
+                        }
                     }
-                }
-                
-                // 4. Domain Availability Check (HTTP response)
-                if (config('email-verification.check_domain_availability', false)) {
-                    $availabilityCheck = $this->checkDomainAvailability($domain);
-                    if (!$availabilityCheck['available']) {
-                        return [
-                            'valid' => false,
-                            'status' => 'invalid',
-                            'error' => 'Domain is not accessible or does not respond',
-                            'reason' => 'domain_not_available',
-                        ];
+                    
+                    // 3. HTTP Redirect Detection (optional, can be disabled for performance)
+                    if (config('email-verification.check_domain_redirect', false)) {
+                        $redirectCheck = $this->checkDomainRedirect($domain);
+                        if ($redirectCheck['is_redirect']) {
+                            return [
+                                'valid' => false,
+                                'status' => 'risky',
+                                'error' => 'Domain redirects to another domain (possible spam trap)',
+                                'reason' => 'domain_redirect',
+                                'redirect_to' => $redirectCheck['redirect_to'] ?? null,
+                            ];
+                        }
                     }
+                    
+                    // 4. Domain Availability Check (HTTP response)
+                    if (config('email-verification.check_domain_availability', false)) {
+                        $availabilityCheck = $this->checkDomainAvailability($domain);
+                        if (!$availabilityCheck['available']) {
+                            return [
+                                'valid' => false,
+                                'status' => 'invalid',
+                                'error' => 'Domain is not accessible or does not respond',
+                                'reason' => 'domain_not_available',
+                            ];
+                        }
+                    }
+                    
+                    return ['valid' => true];
+                } finally {
+                    // Restore original timeout
+                    ini_set('default_socket_timeout', $originalTimeout);
                 }
-                
-                return ['valid' => true];
-            } finally {
-                // Restore original timeout
-                ini_set('default_socket_timeout', $originalTimeout);
-            }
-        });
+            });
+        } catch (\Exception $e) {
+            // If cache or DNS lookup fails, log and assume domain is valid (to avoid false negatives)
+            // This is a fallback - we don't want to block valid domains due to temporary DNS/cache issues
+            Log::warning('Domain validity check failed, assuming valid to avoid false negatives', [
+                'domain' => $domain,
+                'error' => $e->getMessage(),
+            ]);
+            return ['valid' => true];
+        }
     }
     
     /**

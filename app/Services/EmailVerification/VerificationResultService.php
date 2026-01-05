@@ -339,27 +339,31 @@ class VerificationResultService
         // Role-based emails with valid domains get ~64-70 score, not 0
         // Don't return early - let scoring logic handle it, then check at end
 
-        // Check for catch-all (only if actually detected, not just based on score or status)
-        // Emailable: low_deliverability - The email address appears to be deliverable, but deliverability cannot be guaranteed (Risky)
-        if ($result['catch_all'] ?? false) {
-            return $makeResult('risky', 'catch_all', 'low_deliverability');
-        }
-
         // Check for valid email (SMTP verified or high confidence)
         // Emailable: accepted_email - The email address exists and is deliverable
         if ($result['smtp'] ?? false) {
             return $makeResult('deliverable', 'valid', 'accepted_email');
         }
 
-        // If MX records exist and domain is valid, but SMTP not checked (public providers)
-        // Emailable: accepted_email - The email address exists and is deliverable
-        // Free providers with catch-all are treated as accepted_email (deliverable) with score 85-93
+        // PRIORITY: Free providers with catch-all are treated as accepted_email (deliverable) with score 85-93
+        // This must be checked BEFORE general catch-all check
+        // Emailable: Free providers (Gmail, Yahoo, Outlook) with catch-all = accepted_email (deliverable)
         if (($result['mx_record'] ?? false) &&
             ($result['domain_validity'] ?? false) &&
             ($result['status'] ?? null) === 'valid' &&
             ($result['free'] ?? $result['is_free'] ?? false) &&
-            ($result['catch_all'] ?? false)) {
+            ($result['catch_all'] ?? false) &&
+            ($result['score'] ?? 0) >= 80) { // Only if score >= 80 (Emailable treats >= 80 as deliverable)
             return $makeResult('deliverable', 'valid', 'accepted_email');
+        }
+
+        // Check for catch-all (only if NOT free provider or score < 80)
+        // Emailable: low_deliverability - The email address appears to be deliverable, but deliverability cannot be guaranteed (Risky)
+        // This applies to non-free catch-all domains or free providers with low score (< 80)
+        if ($result['catch_all'] ?? false) {
+            // For free providers with score < 80, still risky
+            // For non-free providers with catch-all, risky
+            return $makeResult('risky', 'catch_all', 'low_deliverability');
         }
 
         // Non-free catch-all with valid domain = low_deliverability (risky)

@@ -301,23 +301,49 @@ class EmailVerificationService
             }
 
             // 3.9. Domain validity check (DNS resolution, redirect detection, availability)
-            $domainValidity = $this->domainValidationService->checkDomainValidity($parts['domain']);
-            if (!$domainValidity['valid']) {
-                $result['status'] = $domainValidity['status'] ?? 'invalid';
-                $result['error'] = $domainValidity['error'] ?? 'Domain does not exist or is not accessible';
-                $result['score'] = 0;
-                $result['domain_validity'] = false;
-                $this->verificationResultService->addDuration($result, $startTime);
-                // Determine state and result before saving
-                $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
-                $result['state'] = $stateAndResult['state'];
-                $result['result'] = $stateAndResult['result'];
-                $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
-                $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
-                return $this->verificationResultService->formatResponse($result);
+            try {
+                $domainValidity = $this->domainValidationService->checkDomainValidity($parts['domain']);
+                
+                // Ensure we have a valid result structure
+                if (!is_array($domainValidity) || !isset($domainValidity['valid'])) {
+                    Log::warning('Domain validity check returned invalid structure', [
+                        'email' => $email,
+                        'domain' => $parts['domain'],
+                        'result' => $domainValidity,
+                    ]);
+                    // Assume valid to avoid false negatives
+                    $result['domain_validity'] = true;
+                    $result['checks']['domain_validity'] = true;
+                } elseif (!($domainValidity['valid'] ?? false)) {
+                    $result['status'] = $domainValidity['status'] ?? 'invalid';
+                    $result['error'] = $domainValidity['error'] ?? 'Domain does not exist or is not accessible';
+                    $result['score'] = 0;
+                    $result['domain_validity'] = false;
+                    $this->verificationResultService->addDuration($result, $startTime);
+                    // Determine state and result before saving
+                    $stateAndResult = $this->verificationResultService->determineStateAndResult($result);
+                    $result['state'] = $stateAndResult['state'];
+                    $result['result'] = $stateAndResult['result'];
+                    $result['reason'] = $stateAndResult['reason'] ?? $stateAndResult['result'];
+                    $this->verificationResultService->saveVerification($result, $userId, $teamId, $tokenId, $parts, $bulkJobId, $source);
+                    return $this->verificationResultService->formatResponse($result);
+                } else {
+                    // Domain is valid
+                    $result['domain_validity'] = true;
+                    $result['checks']['domain_validity'] = true; // Update checks array
+                }
+            } catch (\Exception $e) {
+                // If domain validity check fails due to exception, log and continue (assume valid to avoid false negatives)
+                Log::warning('Domain validity check exception', [
+                    'email' => $email,
+                    'domain' => $parts['domain'] ?? null,
+                    'error' => $e->getMessage(),
+                    'trace' => $e->getTraceAsString(),
+                ]);
+                // Continue - assume domain is valid to avoid false negatives
+                $result['domain_validity'] = true;
+                $result['checks']['domain_validity'] = true;
             }
-            $result['domain_validity'] = true;
-            $result['checks']['domain_validity'] = true; // Update checks array
 
             // 4. MX check
             $mxCheck = $this->domainValidationService->checkMx($parts['domain']);
